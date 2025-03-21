@@ -1,6 +1,0 @@
-[submodule "vni-service"]
-	path = vni-service
-	url = git@github.com:opencube-horizon/vni-service
-[submodule "cxi-cni-plugin"]
-	path = cxi-cni-plugin
-	url = git@github.com:opencube-horizon/cxi-cni-plugin

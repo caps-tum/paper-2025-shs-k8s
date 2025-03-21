@@ -1,36 +1,23 @@
-# Guide for HPE Slingshot 11 integration into Kubernetes
-
-
-HPE Slingshot 11 is an HPC-focused high-performance network solution, providing RDMA capabilities. As a consequence, integration into container-based deployments using e.g. Kubernetes is not possible without further action.
-This document describes the required further action.
-
-Refer to `PROBLEM_STATEMENT.md` for background information.
-
-Three components are necessary and described in this document:
-
-1. Adjustments to CXI driver and userspace library `libcxi`
-2. CXI CNI Plugin
-3. VNI Service & Custom Resource for Kubernetes
-
+# Install
 
 The following instructions have been tested on an OpenSUSE Leap 15.5 Linux, kernel 5.14.21, libcxi version 1.5.5, podman version 4.9.5, k3s version v1.29.5, go version 1.22.6.
 
-## CXI Driver and library adjustments
 
-The patches in `patches/cxi-driver-libcxi` are responsible for adding the network-namespace member type `CXI_SVC_MEMBER_NET_NS` and the associated checking logic to the driver and libcxi.
+## CXI Driver and Library
+
+Building the CXI kernel driver requires access to the full Slingshot software stack. Due to licensing concerns, the patches to these drivers can only be handed out upon request. 
+Upstreaming these changes is planned.
 
 ## CXI CNI Plugin
 
-The patches in `patches/cxi-cni` add the CXI CNI plugin to the CNI plugins repository (https://github.com/containernetworking/plugins). Check out the repository at [v1.6.2](https://github.com/containernetworking/plugins/tree/v1.6.2) and apply the patches.
+Clone the CNI plugins repository at https://github.com/containernetworking/plugins. Tag v1.6.2. has been tested. Apply the patch in `patches/cni_plugin` to the repository.
+Adjust file `plugins/cxi/cxi.go`, specifically the `CFLAGS` and `LDFLAGS` to point to the build directory of the patched libcxi library.
 
-Alternatively, clone the already-patched repository at: https://github.com/opencube-horizon/cxi-cni-plugin (git submodule `cxi-cni-plugin`).
+Run `go mod tidy` and then `go mod vendor`. Finally, run `build_linux.sh`, which should build the CXI plugin at `bin/cxi`. 
 
-Build the CXI CNI plugin by running the `build_linux.sh` file, which should generate a `cxi` binary in `$PWD/bin`. 
+Move this binary to the folder of your CNI plugins. The exact location depends on the Kubernetes deployment and the used network software. For a default flannel, this is `/opt/cni/bin`.
 
-Adding this CNI plugin to a container runtime highly depends on the runtime in question. 
-
-
-### K3s
+### Install in K3s
 
 K3s by default bundles flannel as its overlay container network. This disallows injecting a CNI. Therefore, k3s must be launched without default flannel using `flannel-backend: "none"` in the config file (or the `--flannel-backend none` parameter).
 Next, re-add flannel:
@@ -40,7 +27,7 @@ Next, re-add flannel:
 
 Finally, apply the yaml file to the k3s cluster.
 
-### Podman
+### Install in Podman
 
 For testing purposes, you can also add the CNI plugin to podman.
 
@@ -60,12 +47,18 @@ cni_plugin_dirs = [
 
 Create a new podman network using `sudo podman network create`.
 Modify the network configuration file at `/etc/cni/net.d/cni-<name-of-network>.conflist` and add another entry to the `plugins` list:
+
 ```json
 { "type":"cxi" }
 ```
 
 Note that the CXI CNI plugin must run as root / as a user priviledged to add/remove CXI services. Therefore we need to operate on root-visible files in `/etc`. Alternatively, `/root/.config/` can be used as well.
 
+
+## Libfabric
+
+Clone the libfabric repository at https://github.com/ofiwg/libfabric. Tag v2.1.0 has been tested. Apply the patch in `patches/libfabric` to the repository. Run `autogen.sh`. Configure the libfabric project to your needs and add the flag `--enable-cxi=true`. You might have do add explicit paths to several dependencies, such as `--with-json-c` or `--with-curl`. Build and install the project. The resulting libfabric library should now include the patched CXI stack. Verify that the cxi provider is available by running `fi_info -l`.
+Note that this requires access to the libcxi library for building and a Slingshot NIC for testing.
 
 ## VNI Service
 
