@@ -1,13 +1,13 @@
 # Install
 
 The following instructions have been tested on an OpenSUSE Leap 15.5 Linux, kernel 5.14.21, libcxi version 1.5.5, podman version 4.9.5, k3s version v1.29.5, go version 1.22.6.
-
+We assume an already-running k3s system.
 
 ## CXI Driver and Library
 
 Building the CXI kernel driver requires access to the full Slingshot software stack. The patches to `libcxi` and the Slingshot Cassini driver are attached under `patches/{libcxi,shs-cxi-driver}`, respectively. Consult HPE documentation for how to install these patches based on the Slingshot hardware you may have.
 
-Upstreaming these changes is planned.
+Upstreaming these patches is planned.
 
 ## CXI CNI Plugin
 
@@ -22,13 +22,17 @@ Move this binary to the folder of your CNI plugins. The exact location depends o
 
 (This variant is used in the paper.)
 
-K3s by default bundles flannel as its overlay container network. This disallows injecting a CNI. Therefore, k3s must be launched without default flannel using `flannel-backend: "none"` in the config file (or the `--flannel-backend none` parameter).
+K3s by default bundles flannel as its overlay container network. This disallows injecting a CNI. 
+Therefore, k3s must be launched without default flannel using `flannel-backend: "none"` in the config file (or the `--flannel-backend none` parameter).
+> Note: You will need to wipe & re-initialise the k3s cluster if you have initialised it with the bundled flannel overlay network.
+> K3s provides a [killall](https://docs.k3s.io/upgrades/killall) script for this purpose. 
+
 Next, re-add flannel:
 - get the `kube-flannel.yaml` file from (https://github.com/flannel-io/flannel/blob/master/Documentation/kube-flannel.yml)
-- add the `{ "type":"cxi" }` entry to the `cni-conf.json` entry in the `ConfigMap` entry of that yaml file.
+- add the `{ "type":"cxi" }` entry to the `cni-conf.json` setting in the `ConfigMap` entry of that yaml file, specifically to the `plugins` array.
 - Since `/opt/cni/bin` is already mounted as a hostPath, no further action has to be taken in order to add the CXI CNI binary to the flannel containers.
 
-Finally, apply the yaml file to the k3s cluster.
+Finally, apply the updated yaml file to the k3s cluster. This should add flannel to the k3s cluster and add the CXI CNI binary as a dependency to all overlay networks.
 
 ### Install via Cilium
 
@@ -65,7 +69,8 @@ Note that the CXI CNI plugin must run as root / as a user priviledged to add/rem
 
 ## VNI Service
 
-The repository at (REDACTED for double-blind review, use folder repositories/vni-service) contains the documentation and code for deploying the VNI service.
+The code at https://github.com/opencube-horizon/vni-service contains the documentation and code for deploying the VNI service.
+Alternatively, you can use the git submodule at `repositories/vni-service`. Make sure to run `git pull --recurse-submodules` to properly pull the submodule.
 
 ## Libfabric
 

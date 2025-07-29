@@ -1,0 +1,3 @@
+[submodule "repositories/vni-service"]
+	path = repositories/vni-service
+	url = git@github.com:opencube-horizon/vni-service
