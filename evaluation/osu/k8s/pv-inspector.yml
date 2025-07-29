@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pv-inspector
+  namespace: stresstest
+spec:
+  terminationGracePeriodSeconds: 0
+  containers:
+    - image: busybox
+      name: pv-inspector
+      command: ["tail"]
+      args: ["-f", "/dev/null"]
+      volumeMounts:
+        - mountPath: /pvc
+          name: pvc-mount
+  volumes:
+    - name: pvc-mount
+      persistentVolumeClaim:
+        claimName: output-pvc

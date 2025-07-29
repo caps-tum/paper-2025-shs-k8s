@@ -5,7 +5,8 @@ The following instructions have been tested on an OpenSUSE Leap 15.5 Linux, kern
 
 ## CXI Driver and Library
 
-Building the CXI kernel driver requires access to the full Slingshot software stack. Due to licensing concerns, the patches to these drivers can only be handed out upon request. 
+Building the CXI kernel driver requires access to the full Slingshot software stack. The patches to `libcxi` and the Slingshot Cassini driver are attached under `patches/{libcxi,shs-cxi-driver}`, respectively. Consult HPE documentation for how to install these patches based on the Slingshot hardware you may have.
+
 Upstreaming these changes is planned.
 
 ## CXI CNI Plugin
@@ -17,7 +18,9 @@ Run `go mod tidy` and then `go mod vendor`. Finally, run `build_linux.sh`, which
 
 Move this binary to the folder of your CNI plugins. The exact location depends on the Kubernetes deployment and the used network software. For a default flannel, this is `/opt/cni/bin`.
 
-### Install in K3s
+### Install in K3s via Flannel
+
+(This variant is used in the paper.)
 
 K3s by default bundles flannel as its overlay container network. This disallows injecting a CNI. Therefore, k3s must be launched without default flannel using `flannel-backend: "none"` in the config file (or the `--flannel-backend none` parameter).
 Next, re-add flannel:
@@ -26,6 +29,12 @@ Next, re-add flannel:
 - Since `/opt/cni/bin` is already mounted as a hostPath, no further action has to be taken in order to add the CXI CNI binary to the flannel containers.
 
 Finally, apply the yaml file to the k3s cluster.
+
+### Install via Cilium
+
+Cilium exposes the setting `cni.customConf` during installation. If set to true, the CNI configuration file at `cni.confPath` (default: `/etc/cni/net.d`) will not be automatically generated. One approach for deploying the CXI CNI plugin is to deploy Cilium using default settings, letting it generate a CNI configuration e.g. at `/etc/cni/net.d/05-cilium.conflist`. Then uninstall cilium, modify the configuration file by adding `{ "type": "cxi" }` as a plugin, and then reinstalling it with the option `cni.customConf=true`. Note that the `cxi` CNI plugin binary must be located at the folder specified at `cni.binPath`. Also note that the whole path must be owned by `root:root`!
+
+The remaining installation process is identical to the Cilium process. 
 
 ### Install in Podman
 
@@ -54,12 +63,11 @@ Modify the network configuration file at `/etc/cni/net.d/cni-<name-of-network>.c
 
 Note that the CXI CNI plugin must run as root / as a user priviledged to add/remove CXI services. Therefore we need to operate on root-visible files in `/etc`. Alternatively, `/root/.config/` can be used as well.
 
+## VNI Service
+
+The repository at (REDACTED for double-blind review, use folder repositories/vni-service) contains the documentation and code for deploying the VNI service.
 
 ## Libfabric
 
 Clone the libfabric repository at https://github.com/ofiwg/libfabric. Tag v2.1.0 has been tested. Apply the patch in `patches/libfabric` to the repository. Run `autogen.sh`. Configure the libfabric project to your needs and add the flag `--enable-cxi=true`. You might have do add explicit paths to several dependencies, such as `--with-json-c` or `--with-curl`. Build and install the project. The resulting libfabric library should now include the patched CXI stack. Verify that the cxi provider is available by running `fi_info -l`.
 Note that this requires access to the libcxi library for building and a Slingshot NIC for testing.
-
-## VNI Service
-
-The repository at https://github.com/opencube-horizon/vni-service or the git submodule `vni-service` contains the documentation and code for deploying the VNI service 

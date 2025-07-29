@@ -1,0 +1,139 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: output-pvc
+  namespace: stresstest
+spec:
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: batch.volcano.sh/v1alpha1
+kind: Job
+metadata:
+  name: lm-mpi-job
+  namespace: stresstest
+  annotations:
+    vni: "true"
+spec:
+  minAvailable: 3
+  schedulerName: volcano
+  plugins:
+    ssh: []
+    svc: []
+  tasks:
+    - replicas: 1
+      name: mpilauncher
+      policies:
+        - event: TaskCompleted
+          action: CompleteJob
+      template:
+        spec:
+          volumes:
+            - name: libcxi
+              hostPath:
+                path: /opt/libcxi-netns/lib/libcxi.so.1.5.0
+                type: File
+            - name: output-pv
+              persistentVolumeClaim:
+                claimName: output-pvc
+          terminationGracePeriodSeconds: 0
+          containers:
+            - command:
+                - /bin/sh
+                - -c
+                - |
+                  mkdir -p /var/run/sshd; /usr/sbin/sshd;
+                  sleep 5;
+                  su mpiuser -m -c 'bash /home/mpiuser/launcher_multi.sh \
+                    --basedir /tmp/output \
+                    --mpirun $(which mpirun) \
+                    --iterations 10 \
+                    --hostfile /etc/volcano/mpiworker.host \
+                    --mpi-args "-np 2 \
+                      -x CXIP_SKIP_AMA_CHECK=true \
+                      -x FI_CXI_LLRING_MODE=never \
+                      -x FI_PROVIDER=cxi \
+                      --mca pml cm --mca mtl ofi" \
+                    --binary /home/mpiuser/osu/c/mpi/pt2pt/standard/osu_latency \
+                    --binary-args "-m 1:1048576 -i 20000"
+                  ';
+                  su mpiuser -m -c 'bash /home/mpiuser/launcher_multi.sh \
+                    --basedir /tmp/output \
+                    --mpirun $(which mpirun) \
+                    --iterations 10 \
+                    --hostfile /etc/volcano/mpiworker.host \
+                    --mpi-args "-np 2 \
+                      -x CXIP_SKIP_AMA_CHECK=true \
+                      -x FI_CXI_LLRING_MODE=never \
+                      -x FI_PROVIDER=cxi \
+                      --mca pml cm --mca mtl ofi" \
+                    --binary /home/mpiuser/osu/c/mpi/pt2pt/standard/osu_bw \
+                    --binary-args "-m 1:1048576 -i 10000"
+                  ';
+
+              image: harbor.pt.horizon-opencube.eu/vni-system/stresstest-osu:1.3.3
+              name: mpilauncher
+              resources:
+                requests:
+                  smarter-devices/cxi0: "1"
+                limits:
+                  smarter-devices/cxi0: "1"
+              volumeMounts:
+                - name: libcxi
+                  readOnly: true
+                  mountPath: /usr/lib64/libcxi.so.1
+                - name: output-pv
+                  mountPath: /tmp/output
+              ports:
+                - containerPort: 22
+                  name: mpijob-port
+              workingDir: /home
+          restartPolicy: OnFailure
+    - replicas: 2
+      name: mpiworker
+      template:
+        metadata:
+          labels:
+            app: mpiworker
+        spec:
+          terminationGracePeriodSeconds: 0
+          topologySpreadConstraints:
+            - maxSkew: 1
+              topologyKey: kubernetes.io/hostname
+              whenUnsatisfiable: DoNotSchedule
+              matchLabelKeys:
+                - pod-template-hash
+              labelSelector:
+                matchLabels:
+                  app: mpiworker
+          volumes:
+            - name: libcxi
+              hostPath:
+                path: /opt/libcxi-netns/lib/libcxi.so.1.5.0
+                type: File
+          containers:
+            - command:
+                - /bin/sh
+                - -c
+                - |
+                  mkdir -p /var/run/sshd; /usr/sbin/sshd -D;
+              image: harbor.pt.horizon-opencube.eu/vni-system/stresstest-osu:1.3.3
+              name: mpiworker
+              resources:
+                requests:
+                  smarter-devices/cxi0: "1"
+                limits:
+                  smarter-devices/cxi0: "1"
+              volumeMounts:
+                - name: libcxi
+                  readOnly: true
+                  mountPath: /usr/lib64/libcxi.so.1
+              ports:
+                - containerPort: 22
+                  name: mpijob-port
+              workingDir: /home
+          restartPolicy: OnFailure

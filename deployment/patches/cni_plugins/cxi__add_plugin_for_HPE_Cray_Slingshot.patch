@@ -1,13 +1,39 @@
-Subject: [PATCH] cxi: add plugin for HPE Cray Slingshot This CNI plugin handles creation and deletion of CXI services on host. It expects a VNI service to run on the cluster which assigns VNIs to pods.
+Subject: [PATCH] cxi: add plugin for HPE Cray Slingshot
+This CNI plugin handles creation and deletion of CXI services on host. It expects a VNI service to run on the cluster which assigns VNIs to pods.
 ---
+Index: plugins/cxi/sample_suite_test.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/plugins/cxi/sample_suite_test.go b/plugins/cxi/sample_suite_test.go
+new file mode 100644
+--- /dev/null	(date 1742555422067)
++++ b/plugins/cxi/sample_suite_test.go	(date 1742555422067)
+@@ -0,0 +1,15 @@
++// The boilerplate needed for Ginkgo
++
++package main
++
++import (
++	"testing"
++
++	. "github.com/onsi/ginkgo/v2"
++	. "github.com/onsi/gomega"
++)
++
++func TestCXI(t *testing.T) {
++	RegisterFailHandler(Fail)
++	RunSpecs(t, "plugins/cxi")
++}
 Index: build_linux.sh
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
 diff --git a/build_linux.sh b/build_linux.sh
---- a/build_linux.sh	(revision 670139cffa3075aa42f08c8f1dc2257396205a54)
-+++ b/build_linux.sh	(revision 86be179f11791428f14263d88ae084b60dba1544)
+--- a/build_linux.sh	(revision 7f756b411efc3d3730c707e2cc1f2baf1a66e28c)
++++ b/build_linux.sh	(date 1742555422065)
 @@ -11,7 +11,9 @@
  mkdir -p "${PWD}/bin"
  
@@ -19,305 +45,6 @@ diff --git a/build_linux.sh b/build_linux.sh
  for d in $PLUGINS; do
  	if [ -d "$d" ]; then
  		plugin="$(basename "$d")"
-Index: go.mod
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
-Index: plugins/cxi/README.md
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
-diff --git a/plugins/cxi/README.md b/plugins/cxi/README.md
-new file mode 100644
---- /dev/null	(revision 86be179f11791428f14263d88ae084b60dba1544)
-+++ b/plugins/cxi/README.md	(revision 86be179f11791428f14263d88ae084b60dba1544)
-@@ -0,0 +1,41 @@
-+# CXI CNI plugin
-+
-+This is a prototype implementation of the HPE Cray Slingshot 11 CXI CNI Plugin.
-+It is responsible for creating and deleting CXI services for each requesting pod/namespace.
-+It uses a patched CXI driver & library stack, which adds NetworkNamespace support for the CXI member checks.
-+
-+In this version, the plugin expects to be executed within a Kubernetes deployment for VNI management.
-+
-+## Architecture
-+
-+The CXI CNI plugin is a chained CNI plugin, meaning it is usually applied in conjunction with other non-chained CNI plugins.
-+The CXI CNI plugin does not create new interfaces, but only modifies the node-level CXI services based on incoming and deleted pods/namespaces.
-+
-+
-+### Command-Add
-+During creation, the plugin extracts the network namespace inode ID from the given network namespace. 
-+Based on this ID, it fetches the pre-configured VNI from the kubelet running on the node. This is achieved via a REST request.
-+Fetching the VNI involves a lookup of details of the pod currently under construction. 
-+If either the pod is annotated with `needs-global-vni: yes`, or the owning resource of that pod is annotated with `needs-vni: yes`, then another lookup
-+is performed against kubernetes searching for the respective VNI custom resource.
-+
-+Note that in order to determine the owner of the pod, two code paths are implemented: 
-+
-+(1) If the owner API Version and Kind (read: the type) are known to be Job, DaemonSet, Deployment, or ReplicaSet, then 
-+the client-go native support for these resources is used to perform a structured lookup.
-+(2) If the owner type is not known (can be the case for custom resources such as volcano.sh-Jobs), then a raw request against
-+`/apis/$apiVersion/namespaces/$ns/$kind/$ownerName` is performed. While `$apiVersion`, `$ns`, and `$ownerName` are known and directly
-+taken from the kubelet-provided information, `$kind` needs to be converted. 
-+This is due to the naming convention of Kubernetes: The kubelet-response returns the "singular", e.g. "Job", whereas the 
-+API expects the lower-case plural, in this case "jobs". Whether all custom resources adhere to this convention is not guaranteed and 
-+the lookup is performed in a best-effort manner.
-+
-+Once the VNI has been extracted, a new CXI service with that VNI and namespace ID is configured for all present CXI devices.
-+
-+### Command-Del
-+
-+During deletion, the plugin extracts the network namespace inode ID from the given network namespace and uses it to delete
-+all CXI services associated with that netns-ID for all present CXI devices. 
-+Note that under normal circumstances, only one CXI service should exist per netns-ID. 
-+If more exist however, deletion of all services is still warranted since the network namespace in question is about to be deleted, rendering
-+all CXI services configured against this netns stale and prone to ID-reuse-scenarios.
-Index: plugins/cxi/cxi.go
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
-diff --git a/plugins/cxi/cxi.go b/plugins/cxi/cxi.go
-new file mode 100644
---- /dev/null	(revision 86be179f11791428f14263d88ae084b60dba1544)
-+++ b/plugins/cxi/cxi.go	(revision 86be179f11791428f14263d88ae084b60dba1544)
-@@ -0,0 +1,39 @@
-+package main
-+
-+// #cgo CFLAGS: -Wall -I/opt/libcxi-netns/include
-+// #cgo LDFLAGS: -L/opt/libcxi-netns/lib -lcxi
-+/*
-+#include "cxi_wrapper.h"
-+*/
-+import "C"
-+import (
-+	"errors"
-+	"fmt"
-+)
-+
-+// Create CXI Service for given NetNS ID and VNI
-+// Upon service creation, add the netns ID to service member list.
-+// Set restricted_vnis to true and add VNI
-+func createService(netns uint64, vnis []uint16) error {
-+	if len(vnis) > 4 {
-+		return errors.New("cannot add more than 4 VNIs")
-+	}
-+	ret := C.alloc_svc(
-+		C.uint64_t(netns),
-+		(*C.uint16_t)(&vnis[0]),
-+		C.size_t(len(vnis)))
-+	if ret < 0 {
-+		return errors.New(fmt.Sprintf("failed to create service for netns %d and vnis %v: %v", netns, vnis, ret))
-+	}
-+	return nil
-+}
-+
-+// Destroy Service for given NetNS identifier.
-+// Iterates through all CXI services and removes the first service that matches the netns ID.
-+func destroyService(netns uint64) error {
-+	ret := C.destroy_svc(C.uint64_t(netns))
-+	if ret != 0 {
-+		return errors.New(fmt.Sprintf("failed to destroy service for netns %d: %v", netns, ret))
-+	}
-+	return nil
-+}
-Index: plugins/cxi/cxi_wrapper.c
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
-diff --git a/plugins/cxi/cxi_wrapper.c b/plugins/cxi/cxi_wrapper.c
-new file mode 100644
---- /dev/null	(revision 86be179f11791428f14263d88ae084b60dba1544)
-+++ b/plugins/cxi/cxi_wrapper.c	(revision 86be179f11791428f14263d88ae084b60dba1544)
-@@ -0,0 +1,183 @@
-+#include "cxi_wrapper.h"
-+
-+// code inspired from slurm code
-+// https://github.com/SchedMD/slurm/blob/master/src/plugins/switch/hpe_slingshot/setup_nic.c
-+// GNU GPL
-+
-+static struct cxil_dev **cxi_devs;
-+
-+bool get_cxi_devices(int *num_devs) {
-+    struct cxil_device_list *devlist;
-+    int ret = cxil_get_device_list(&devlist);
-+	if (ret != 0) {
-+		fprintf(stderr, "cxil_get_device_list failed: %i", ret);
-+		return false;
-+	}
-+
-+	if (devlist->count == 0) {
-+		fprintf(stderr, "No CXI devices");
-+		return false;
-+	}
-+
-+	cxi_devs = calloc(devlist->count, sizeof(struct cxil_dev *));
-+	*num_devs = devlist->count;
-+
-+	for (int dev = 0; dev < *num_devs; dev++) {
-+        struct cxil_devinfo *info = &devlist->info[dev];
-+        int ret = cxil_open_device(info->dev_id, &cxi_devs[dev]);
-+        if (ret) {
-+            fprintf(stderr, "Could not open CXI device dev_id=%d (%s): %s",
-+                    info->dev_id, info->device_name, strerror(-ret));
-+            cxi_devs[dev] = NULL;
-+            continue;
-+        }
-+    }
-+    return true;
-+}
-+
-+void generate_cxi_svc_desc(struct cxi_svc_desc *svc_desc, const struct cxil_devinfo *devinfo,
-+                           unsigned int netns, uint16_t *vnis, size_t num_vnis) {
-+    memset(svc_desc, 0, sizeof(*svc_desc));
-+    svc_desc->restricted_members = true;
-+    svc_desc->members[0].type = CXI_SVC_MEMBER_NET_NS;
-+    svc_desc->members[0].svc_member.netns = netns;
-+
-+    svc_desc->restricted_vnis = true;
-+    svc_desc->num_vld_vnis = num_vnis;
-+    for (int i = 0; i < num_vnis; i++)
-+        svc_desc->vnis[i] = vnis[i];
-+
-+    svc_desc->restricted_tcs = true;
-+    svc_desc->tcs[CXI_TC_BEST_EFFORT] = true;
-+
-+    // defaults taken from slurm src/plugins/switch/hpe_slingshot/switch_hpe_slingshot.h
-+    svc_desc->resource_limits = true;
-+    svc_desc->limits.txqs = (struct cxi_limits){.max=1024, .res=2};
-+    svc_desc->limits.tgqs = (struct cxi_limits){.max=512, .res=1};
-+    svc_desc->limits.eqs = (struct cxi_limits){.max=2047, .res=2};
-+    svc_desc->limits.cts = (struct cxi_limits){.max=2047, .res=1};
-+    svc_desc->limits.tles = (struct cxi_limits){.max=2048, .res=1};
-+    svc_desc->limits.ptes = (struct cxi_limits){.max=2048, .res=6};
-+    svc_desc->limits.les = (struct cxi_limits){.max=16384, .res=1};
-+    svc_desc->limits.acs = (struct cxi_limits){.max=1022, .res=4};
-+
-+    svc_desc->is_system_svc = false;
-+}
-+
-+
-+int alloc_svc(uint64_t netns, uint16_t *vnis, size_t num_vnis) {
-+    int num_devs = 0;
-+    if (!get_cxi_devices(&num_devs)) {
-+        fprintf(stderr, "Could not get CXI devices\n");
-+        return -1;
-+    }
-+    if (cxi_devs == NULL) {
-+        fprintf(stderr, "cxi_devs is NULL!\n");
-+        return -1;
-+    }
-+
-+    struct cxi_svc_fail_info fail_info;
-+    struct cxi_svc_desc svc_desc;
-+    struct cxil_svc_list *svc_list;
-+
-+    for (int dev_num = 0; dev_num < num_devs; dev_num++) {
-+        struct cxil_dev *dev = cxi_devs[dev_num];
-+
-+        int ret = cxil_get_svc_list(dev, &svc_list);
-+        if (ret) {
-+            fprintf(stderr, "Error while getting SVC list on device %s: %s",
-+                 dev->info.device_name, strerror(-ret));
-+            return ret;
-+        }
-+
-+        int svc_id = -1;
-+        for (int i = 0; i < svc_list->count; ++i) {
-+            svc_desc = svc_list->descs[i];
-+            for (int j = 0; j < CXI_SVC_MAX_MEMBERS; ++j) {
-+                if (svc_desc.members[j].type == CXI_SVC_MEMBER_NET_NS &&
-+                    svc_desc.members[j].svc_member.netns == netns) {
-+                    // check if all our VNIs match the current svc_desc's VNI (assumes identical order)
-+                    svc_id = svc_desc.svc_id;
-+                    for (int k = 0; k < num_vnis; ++k) {
-+                        if (svc_desc.vnis[k] != vnis[k]) {
-+                            svc_id = -1;
-+                            break;
-+                        }
-+                    }
-+                    break;
-+                }
-+            }
-+            if (svc_id != -1)
-+                break;
-+        }
-+
-+        // if SVC for our netns & vnis exists on current dev, do not create another
-+        if (svc_id != -1)
-+            continue;
-+
-+        generate_cxi_svc_desc(&svc_desc, &dev->info, netns, vnis, num_vnis);
-+        svc_id = cxil_alloc_svc(dev, &svc_desc, &fail_info);
-+        if (svc_id < 0) {
-+            fprintf(stderr, "Error while allocating SVC on device %s: %s",
-+                    dev->info.device_name, strerror(-svc_id));
-+            return -svc_id;
-+        }
-+    }
-+	return 0;
-+}
-+
-+
-+int _destroy_svc(struct cxil_dev *dev, int svc_id) {
-+     for(int retry_count = 0; retry_count < 5; retry_count++) {
-+        int ret = cxil_destroy_svc(dev, svc_id);
-+        if (ret == 0)
-+            return 0;
-+        fprintf(stderr, "Error while deleting SVC %d on device %s: %s",
-+                        svc_id,  dev->info.device_name, strerror(-ret));
-+        if (ret != -EBUSY)
-+            break;
-+        sleep(1);
-+    }
-+    return -1;
-+}
-+
-+// Use SVC discovery mechanism also used in libfabric to get svc_id from netns
-+//  On that, call cxil_destroy_svc
-+int destroy_svc(uint64_t netns) {
-+    int num_devs = 0;
-+    if (!get_cxi_devices(&num_devs)) {
-+        fprintf(stderr, "Could not get CXI devices");
-+        return -1;
-+    }
-+
-+    for (int dev_num = 0; dev_num < num_devs; ++dev_num) {
-+        struct cxil_dev *dev = cxi_devs[dev_num];
-+        struct cxil_svc_list *svc_list;
-+        struct cxi_svc_desc *svc_desc;
-+
-+        int ret = cxil_get_svc_list(dev, &svc_list);
-+        if (ret) {
-+            fprintf(stderr, "Error while getting SVC list on device %s: %s",
-+                 dev->info.device_name, strerror(-ret));
-+            return ret;
-+        }
-+
-+        for (int i = 0; i < svc_list->count; ++i) {
-+            int svc_id = -1;
-+            svc_desc = &svc_list->descs[i];
-+            for (int j = 0; j < CXI_SVC_MAX_MEMBERS; ++j) {
-+                if (svc_desc->members[j].type == CXI_SVC_MEMBER_NET_NS &&
-+                    svc_desc->members[j].svc_member.netns == netns) {
-+                    svc_id = svc_desc->svc_id;
-+                    break;
-+                }
-+            }
-+            if (svc_id == -1)
-+                continue;
-+           int ret = _destroy_svc(dev, svc_id);
-+           if (ret != 0)
-+            return ret;
-+        }
-+    }
-+    return 0;
-+}
-\ No newline at end of file
 Index: plugins/cxi/cxi_wrapper.h
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
@@ -325,8 +52,8 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/plugins/cxi/cxi_wrapper.h b/plugins/cxi/cxi_wrapper.h
 new file mode 100644
---- /dev/null	(revision 86be179f11791428f14263d88ae084b60dba1544)
-+++ b/plugins/cxi/cxi_wrapper.h	(revision 86be179f11791428f14263d88ae084b60dba1544)
+--- /dev/null	(date 1745140732100)
++++ b/plugins/cxi/cxi_wrapper.h	(date 1745140732100)
 @@ -0,0 +1,12 @@
 +// include these, otherwise GCC gets mad at libcxi.h (it has missing includes)
 +#include <stdio.h>
@@ -338,7 +65,7 @@ new file mode 100644
 +#include <unistd.h>
 +#include <stdint.h>
 +
-+int alloc_svc(uint64_t netns, uint16_t *vnis, size_t num_vnis);
++int alloc_svc(uint64_t netns, uint16_t *vnis, size_t num_vnis, uint16_t *svcs, size_t num_svcs);
 +int destroy_svc(uint64_t netns);
 \ No newline at end of file
 Index: plugins/cxi/main.go
@@ -348,9 +75,9 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/plugins/cxi/main.go b/plugins/cxi/main.go
 new file mode 100644
---- /dev/null	(revision 86be179f11791428f14263d88ae084b60dba1544)
-+++ b/plugins/cxi/main.go	(revision 86be179f11791428f14263d88ae084b60dba1544)
-@@ -0,0 +1,363 @@
+--- /dev/null	(date 1745140518641)
++++ b/plugins/cxi/main.go	(date 1745140518641)
+@@ -0,0 +1,374 @@
 +// Copyright 2017 CNI authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -388,6 +115,7 @@ new file mode 100644
 +	"regexp"
 +	"strconv"
 +	"strings"
++	"time"
 +)
 +
 +import (
@@ -497,7 +225,8 @@ new file mode 100644
 +	}
 +	defer fi.Close()
 +
-+	fi.WriteString(fmt.Sprintf("added: %s %s %s %s\n",
++	fi.WriteString(fmt.Sprintf("[%s] added: %s %s %s %s\n",
++		time.Now(),
 +		args.ContainerID, args.IfName, args.Netns, args.Path))
 +	fi.WriteString(fmt.Sprintf("  %s\n", args.Args))
 +
@@ -533,11 +262,12 @@ new file mode 100644
 +	}
 +	fi.WriteString(fmt.Sprintf("  vni: %d\n", vni))
 +
-+	err = createService(netnsInode, []uint16{20, 21, 22, 23})
++	svcs, err := createService(netnsInode, []uint16{vni})
 +	if err != nil {
 +		fi.WriteString(fmt.Sprintf("  Error during CXI service creation: %v+\n", err))
 +		return err
 +	}
++	fi.WriteString(fmt.Sprintf("  created CXI service(s) for netns %d: %v\n", netnsInode, svcs))
 +
 +	// Pass through the result for the next plugin
 +	return types.PrintResult(result, conf.CNIVersion)
@@ -628,27 +358,28 @@ new file mode 100644
 +		terminationGracePeriodSeconds = gjson.GetBytes(result, "spec.template.spec.terminationGracePeriodSeconds").Int()
 +	}
 +
-+	if ownerAnnotations == nil {
-+		return 0, ErrNoVNIRequested
-+	}
-+	vniAnnotation, okVni := ownerAnnotations["vni"]
-+
-+	if !okVni ||
-+		strings.ToLower(vniAnnotation) != "yes" ||
-+		strings.ToLower(vniAnnotation) != "true" {
-+		return 0, ErrNoVNIRequested
-+	}
-+
-+	if terminationGracePeriodSeconds <= 30 {
-+		return 0, errors.New("terminationGracePeriodSeconds must be <= 30sec")
-+	}
-+	//var vniUid string
-+	vniUid := fmt.Sprintf("vni-%s", owner.UID)
 +	fi, err := os.OpenFile("/tmp/cxi_cni", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
 +	if err != nil {
 +		return 0, err
 +	}
 +	defer fi.Close()
++
++	if ownerAnnotations == nil {
++		return 0, ErrNoVNIRequested
++	}
++	vniAnnotation, okVni := ownerAnnotations["vni"]
++	fi.WriteString(fmt.Sprintf("  Annotations for %v: %s\n", owner, vniAnnotation))
++
++	if !(okVni && (strings.ToLower(vniAnnotation) == "yes" ||
++		strings.ToLower(vniAnnotation) == "true")) {
++		return 0, ErrNoVNIRequested
++	}
++
++	if terminationGracePeriodSeconds > 30 {
++		return 0, errors.New(fmt.Sprintf("terminationGracePeriodSeconds must be <= 30sec (is: %d)", terminationGracePeriodSeconds))
++	}
++	//var vniUid string
++	vniUid := fmt.Sprintf("vni-%s", owner.UID)
 +
 +	fi.WriteString(fmt.Sprintf("  fetching VNI for %s\n", vniUid))
 +	// fetch VNI from owner if requested
@@ -684,8 +415,8 @@ new file mode 100644
 +	}
 +	defer fi.Close()
 +
-+	fi.WriteString(fmt.Sprintf("deleted: %s %s %s %s\n",
-+		args.ContainerID, args.IfName, args.Netns, args.Path))
++	fi.WriteString(fmt.Sprintf("[%s] deleted: %s %s %s %s\n",
++		time.Now(), args.ContainerID, args.IfName, args.Netns, args.Path))
 +	fi.WriteString(fmt.Sprintf("  %s\n", args.Args))
 +
 +	netnsInode, err := getNetnsInode(args.Netns)
@@ -703,6 +434,7 @@ new file mode 100644
 +		fi.WriteString(fmt.Sprintf("  Error during CXI service deletion: %v+\n", err))
 +		return err
 +	}
++	fi.WriteString("  deleted service\n")
 +	return nil
 +}
 +
@@ -711,8 +443,68 @@ new file mode 100644
 +}
 +
 +func cmdCheck(_ *skel.CmdArgs) error {
-+	// TODO: implement
++	fi, err := os.OpenFile("/tmp/cxi_cni", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
++	if err != nil {
++		return fmt.Errorf("error during \"logging\"")
++	}
++	fi.WriteString(fmt.Sprintf("[%s] Called CHECK\n", time.Now()))
++
++	defer fi.Close()
 +	return fmt.Errorf("not implemented")
++}
+Index: plugins/cxi/cxi.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/plugins/cxi/cxi.go b/plugins/cxi/cxi.go
+new file mode 100644
+--- /dev/null	(date 1745140581027)
++++ b/plugins/cxi/cxi.go	(date 1745140581027)
+@@ -0,0 +1,44 @@
++package main
++
++// #cgo CFLAGS: -Wall -I/opt/libcxi-netns/include
++// #cgo LDFLAGS: -L/opt/libcxi-netns/lib -lcxi
++/*
++#include "cxi_wrapper.h"
++*/
++import "C"
++import (
++	"errors"
++	"fmt"
++)
++
++// Create CXI Service for given NetNS ID and VNI
++// Upon service creation, add the netns ID to service member list.
++// Set restricted_vnis to true and add VNI
++func createService(netns uint64, vnis []uint16) ([]uint16, error) {
++	if len(vnis) > 4 {
++		return nil, errors.New("cannot add more than 4 VNIs")
++	}
++
++	svcs := make([]uint16, 4)
++	ret := C.alloc_svc(
++		C.uint64_t(netns),
++		(*C.uint16_t)(&vnis[0]),
++		C.size_t(len(vnis)),
++		(*C.uint16_t)(&svcs[0]),
++		C.size_t(len(svcs)),
++	)
++	if ret < 0 {
++		return nil, errors.New(fmt.Sprintf("failed to create service for netns %d and vnis %v: %v", netns, vnis, ret))
++	}
++	return svcs, nil
++}
++
++// Destroy Service for given NetNS identifier.
++// Iterates through all CXI services and removes the first service that matches the netns ID.
++func destroyService(netns uint64) error {
++	ret := C.destroy_svc(C.uint64_t(netns))
++	if ret != 0 {
++		return errors.New(fmt.Sprintf("failed to destroy service for netns %d: %v", netns, ret))
++	}
++	return nil
 +}
 Index: plugins/cxi/sample_linux_test.go
 IDEA additional info:
@@ -721,8 +513,8 @@ Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 ===================================================================
 diff --git a/plugins/cxi/sample_linux_test.go b/plugins/cxi/sample_linux_test.go
 new file mode 100644
---- /dev/null	(revision 86be179f11791428f14263d88ae084b60dba1544)
-+++ b/plugins/cxi/sample_linux_test.go	(revision 86be179f11791428f14263d88ae084b60dba1544)
+--- /dev/null	(date 1742555422067)
++++ b/plugins/cxi/sample_linux_test.go	(date 1742555422067)
 @@ -0,0 +1,128 @@
 +// Copyright 2017 CNI authors
 +//
@@ -852,28 +644,253 @@ new file mode 100644
 +		Expect(err).To(MatchError("must be called as chained plugin"))
 +	})
 +})
-Index: plugins/cxi/sample_suite_test.go
+Index: plugins/cxi/README.md
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
-diff --git a/plugins/cxi/sample_suite_test.go b/plugins/cxi/sample_suite_test.go
+diff --git a/plugins/cxi/README.md b/plugins/cxi/README.md
 new file mode 100644
---- /dev/null	(revision 86be179f11791428f14263d88ae084b60dba1544)
-+++ b/plugins/cxi/sample_suite_test.go	(revision 86be179f11791428f14263d88ae084b60dba1544)
-@@ -0,0 +1,15 @@
-+// The boilerplate needed for Ginkgo
+--- /dev/null	(date 1742555422066)
++++ b/plugins/cxi/README.md	(date 1742555422066)
+@@ -0,0 +1,41 @@
++# CXI CNI plugin
 +
-+package main
++This is a prototype implementation of the HPE Cray Slingshot 11 CXI CNI Plugin.
++It is responsible for creating and deleting CXI services for each requesting pod/namespace.
++It uses a patched CXI driver & library stack, which adds NetworkNamespace support for the CXI member checks.
 +
-+import (
-+	"testing"
++In this version, the plugin expects to be executed within a Kubernetes deployment for VNI management.
 +
-+	. "github.com/onsi/ginkgo/v2"
-+	. "github.com/onsi/gomega"
-+)
++## Architecture
 +
-+func TestCXI(t *testing.T) {
-+	RegisterFailHandler(Fail)
-+	RunSpecs(t, "plugins/cxi")
++The CXI CNI plugin is a chained CNI plugin, meaning it is usually applied in conjunction with other non-chained CNI plugins.
++The CXI CNI plugin does not create new interfaces, but only modifies the node-level CXI services based on incoming and deleted pods/namespaces.
++
++
++### Command-Add
++During creation, the plugin extracts the network namespace inode ID from the given network namespace. 
++Based on this ID, it fetches the pre-configured VNI from the kubelet running on the node. This is achieved via a REST request.
++Fetching the VNI involves a lookup of details of the pod currently under construction. 
++If either the pod is annotated with `needs-global-vni: yes`, or the owning resource of that pod is annotated with `needs-vni: yes`, then another lookup
++is performed against kubernetes searching for the respective VNI custom resource.
++
++Note that in order to determine the owner of the pod, two code paths are implemented: 
++
++(1) If the owner API Version and Kind (read: the type) are known to be Job, DaemonSet, Deployment, or ReplicaSet, then 
++the client-go native support for these resources is used to perform a structured lookup.
++(2) If the owner type is not known (can be the case for custom resources such as volcano.sh-Jobs), then a raw request against
++`/apis/$apiVersion/namespaces/$ns/$kind/$ownerName` is performed. While `$apiVersion`, `$ns`, and `$ownerName` are known and directly
++taken from the kubelet-provided information, `$kind` needs to be converted. 
++This is due to the naming convention of Kubernetes: The kubelet-response returns the "singular", e.g. "Job", whereas the 
++API expects the lower-case plural, in this case "jobs". Whether all custom resources adhere to this convention is not guaranteed and 
++the lookup is performed in a best-effort manner.
++
++Once the VNI has been extracted, a new CXI service with that VNI and namespace ID is configured for all present CXI devices.
++
++### Command-Del
++
++During deletion, the plugin extracts the network namespace inode ID from the given network namespace and uses it to delete
++all CXI services associated with that netns-ID for all present CXI devices. 
++Note that under normal circumstances, only one CXI service should exist per netns-ID. 
++If more exist however, deletion of all services is still warranted since the network namespace in question is about to be deleted, rendering
++all CXI services configured against this netns stale and prone to ID-reuse-scenarios.
+Index: plugins/cxi/cxi_wrapper.c
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/plugins/cxi/cxi_wrapper.c b/plugins/cxi/cxi_wrapper.c
+new file mode 100644
+--- /dev/null	(date 1745141671853)
++++ b/plugins/cxi/cxi_wrapper.c	(date 1745141671853)
+@@ -0,0 +1,188 @@
++#include "cxi_wrapper.h"
++
++// code inspired from slurm code
++// https://github.com/SchedMD/slurm/blob/master/src/plugins/switch/hpe_slingshot/setup_nic.c
++// GNU GPL
++
++static struct cxil_dev **cxi_devs;
++
++bool get_cxi_devices(int *num_devs) {
++    struct cxil_device_list *devlist;
++    int ret = cxil_get_device_list(&devlist);
++	if (ret != 0) {
++		fprintf(stderr, "cxil_get_device_list failed: %i", ret);
++		return false;
++	}
++
++	if (devlist->count == 0) {
++		fprintf(stderr, "No CXI devices");
++		return false;
++	}
++
++	cxi_devs = calloc(devlist->count, sizeof(struct cxil_dev *));
++	*num_devs = devlist->count;
++
++	for (int dev = 0; dev < *num_devs; dev++) {
++        struct cxil_devinfo *info = &devlist->info[dev];
++        int ret = cxil_open_device(info->dev_id, &cxi_devs[dev]);
++        if (ret) {
++            fprintf(stderr, "Could not open CXI device dev_id=%d (%s): %s",
++                    info->dev_id, info->device_name, strerror(-ret));
++            cxi_devs[dev] = NULL;
++            continue;
++        }
++    }
++    return true;
 +}
++
++void generate_cxi_svc_desc(struct cxi_svc_desc *svc_desc, const struct cxil_devinfo *devinfo,
++                           unsigned int netns, uint16_t *vnis, size_t num_vnis) {
++    memset(svc_desc, 0, sizeof(*svc_desc));
++    svc_desc->restricted_members = true;
++    svc_desc->members[0].type = CXI_SVC_MEMBER_NET_NS;
++    svc_desc->members[0].svc_member.netns = netns;
++
++    svc_desc->restricted_vnis = true;
++    svc_desc->num_vld_vnis = num_vnis;
++    for (int i = 0; i < num_vnis; i++)
++        svc_desc->vnis[i] = vnis[i];
++
++    svc_desc->restricted_tcs = false;
++//    svc_desc->tcs[CXI_TC_BEST_EFFORT] = true;
++//    svc_desc->tcs[CXI_TC_LOW_LATENCY] = true;
++//    svc_desc->tcs[CXI_TC_LOW_LATENCY] = true;
++
++    // defaults taken from slurm src/plugins/switch/hpe_slingshot/switch_hpe_slingshot.h
++    svc_desc->resource_limits = false;
++    svc_desc->limits.txqs = (struct cxi_limits){.max=1024, .res=2};
++    svc_desc->limits.tgqs = (struct cxi_limits){.max=512, .res=1};
++    svc_desc->limits.eqs = (struct cxi_limits){.max=2047, .res=2};
++    svc_desc->limits.cts = (struct cxi_limits){.max=2047, .res=1};
++    svc_desc->limits.tles = (struct cxi_limits){.max=2048, .res=1};
++    svc_desc->limits.ptes = (struct cxi_limits){.max=2048, .res=6};
++    svc_desc->limits.les = (struct cxi_limits){.max=16384, .res=1};
++    svc_desc->limits.acs = (struct cxi_limits){.max=1022, .res=4};
++
++    svc_desc->is_system_svc = false;
++}
++
++
++int alloc_svc(uint64_t netns, uint16_t *vnis, size_t num_vnis, uint16_t *svcs, size_t num_svcs) {
++    int num_devs = 0;
++    if (!get_cxi_devices(&num_devs)) {
++        fprintf(stderr, "Could not get CXI devices\n");
++        return -1;
++    }
++    if (cxi_devs == NULL) {
++        fprintf(stderr, "cxi_devs is NULL!\n");
++        return -1;
++    }
++
++    struct cxi_svc_fail_info fail_info;
++    struct cxi_svc_desc svc_desc;
++    struct cxil_svc_list *svc_list;
++
++    for (int dev_num = 0; dev_num < num_devs; dev_num++) {
++        struct cxil_dev *dev = cxi_devs[dev_num];
++
++        int ret = cxil_get_svc_list(dev, &svc_list);
++        if (ret) {
++            fprintf(stderr, "Error while getting SVC list on device %s: %s",
++                 dev->info.device_name, strerror(-ret));
++            return ret;
++        }
++
++        int svc_id = -1;
++        for (int i = 0; i < svc_list->count; ++i) {
++            svc_desc = svc_list->descs[i];
++            for (int j = 0; j < CXI_SVC_MAX_MEMBERS; ++j) {
++                if (svc_desc.members[j].type == CXI_SVC_MEMBER_NET_NS &&
++                    svc_desc.members[j].svc_member.netns == netns) {
++                    // check if all our VNIs match the current svc_desc's VNI (assumes identical order)
++                    svc_id = svc_desc.svc_id;
++                    for (int k = 0; k < num_vnis; ++k) {
++                        if (svc_desc.vnis[k] != vnis[k]) {
++                            svc_id = -1;
++                            break;
++                        }
++                    }
++                    break;
++                }
++            }
++            if (svc_id != -1)
++                break;
++        }
++
++        // if SVC for our netns & vnis exists on current dev, do not create another
++        if (svc_id != -1)
++            continue;
++
++        generate_cxi_svc_desc(&svc_desc, &dev->info, netns, vnis, num_vnis);
++        svc_id = cxil_alloc_svc(dev, &svc_desc, &fail_info);
++        if (svc_id < 0 ) {
++            fprintf(stderr, "Error while allocating SVC on device %s: %s",
++                    dev->info.device_name, strerror(-svc_id));
++            return svc_id;
++        }
++        if (dev_num < num_svcs) {
++            svcs[dev_num] = svc_id;
++        }
++    }
++	return 0;
++}
++
++
++int _destroy_svc(struct cxil_dev *dev, int svc_id) {
++     for(int retry_count = 0; retry_count < 5; retry_count++) {
++        int ret = cxil_destroy_svc(dev, svc_id);
++        if (ret == 0)
++            return 0;
++        fprintf(stderr, "Error while deleting SVC %d on device %s: %s",
++                        svc_id,  dev->info.device_name, strerror(-ret));
++        if (ret != -EBUSY)
++            break;
++        sleep(1);
++    }
++    return -1;
++}
++
++// Use SVC discovery mechanism also used in libfabric to get svc_id from netns
++//  On that, call cxil_destroy_svc
++int destroy_svc(uint64_t netns) {
++    int num_devs = 0;
++    if (!get_cxi_devices(&num_devs)) {
++        fprintf(stderr, "Could not get CXI devices");
++        return -1;
++    }
++
++    for (int dev_num = 0; dev_num < num_devs; ++dev_num) {
++        struct cxil_dev *dev = cxi_devs[dev_num];
++        struct cxil_svc_list *svc_list;
++        struct cxi_svc_desc *svc_desc;
++
++        int ret = cxil_get_svc_list(dev, &svc_list);
++        if (ret) {
++            fprintf(stderr, "Error while getting SVC list on device %s: %s",
++                 dev->info.device_name, strerror(-ret));
++            return ret;
++        }
++
++        for (int i = 0; i < svc_list->count; ++i) {
++            int svc_id = -1;
++            svc_desc = &svc_list->descs[i];
++            for (int j = 0; j < CXI_SVC_MAX_MEMBERS; ++j) {
++                if (svc_desc->members[j].type == CXI_SVC_MEMBER_NET_NS &&
++                    svc_desc->members[j].svc_member.netns == netns) {
++                    svc_id = svc_desc->svc_id;
++                    break;
++                }
++            }
++            if (svc_id == -1)
++                continue;
++           int ret = _destroy_svc(dev, svc_id);
++           if (ret != 0)
++            return ret;
++        }
++    }
++    return 0;
++}
+\ No newline at end of file

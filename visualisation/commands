@@ -1,0 +1,1 @@
+gzip -k -d -c 5-job_output.json.gz |jq '.items[] | select( .involvedObject.kind == "Pod" ) | .message'|sort|uniq
