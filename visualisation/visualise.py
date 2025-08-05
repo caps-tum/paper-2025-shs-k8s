@@ -338,6 +338,7 @@ def lineplot_osu(run_baseline: OSURun,
                  xlabel: str = "",
                  save: bool = False,
                  title: bool = True,
+                 y_lim: Optional[tuple[float,float]] = None,
                  y_minor_locator = matplotlib.ticker.MultipleLocator(0.005),
                  y_major_locator = matplotlib.ticker.MultipleLocator(0.01),
                  figsize: tuple[int, int] = (12, 8),
@@ -443,6 +444,8 @@ def lineplot_osu(run_baseline: OSURun,
         ax.set_ylim(top=y_max)
     if xlabel != "":
         ax.set_xlabel(xlabel)
+    if y_lim != None:
+        ax.set_ylim(*y_lim)
     ax.yaxis.grid(True, which="major")
     ax.yaxis.grid(True, which="minor", alpha=.4, linestyle="--")
     ax.xaxis.grid(True, which="major", alpha=0.5, linewidth=0.75)
