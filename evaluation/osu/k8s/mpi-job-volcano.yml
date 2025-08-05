@@ -16,8 +16,6 @@ kind: Job
 metadata:
   name: lm-mpi-job
   namespace: stresstest
-  annotations:
-    vni: "false"
 spec:
   minAvailable: 3
   schedulerName: volcano
