@@ -34,19 +34,20 @@ Below are the parameters chosen for the benchmarks presented in the paper. Note 
 bash launcher_multi.sh \
 	--basedir $(pwd) \
 	--mpirun /home/pfriese/build/ompi-5.0.7_ofi_cxi_build/bin/mpirun \
-	--iterations 25 \
+	--iterations 10 \
 	--hostfile $(pwd)/hostfile \
 	--mpi-args "-np 2 -x CXIP_SKIP_AMA_CHECK=true -x FI_CXI_LLRING_MODE=never -x FI_PROVIDER=cxi --mca pml cm --mca mtl ofi" \
-	--binary /home/pfriese/build/osu-7.3-ompi5-cxi/c/mpi/pt2pt/standard/osu_bw
+	--binary /home/pfriese/build/osu-7.3-ompi5-cxi/c/mpi/pt2pt/standard/osu_bw \
+	--binary-args "-m 1:1048576 -i 10000"
 
 bash launcher_multi.sh \
 	--basedir $(pwd) \
 	--mpirun /home/pfriese/build/ompi-5.0.7_ofi_cxi_build/bin/mpirun \
-	--iterations 25 \
+	--iterations 10 \
 	--hostfile $(pwd)/hostfile \
 	--mpi-args "-np 2 -x CXIP_SKIP_AMA_CHECK=true -x FI_CXI_LLRING_MODE=never -x FI_PROVIDER=cxi --mca pml cm --mca mtl ofi" \
 	--binary /home/pfriese/build/osu-7.3-ompi5-cxi/c/mpi/pt2pt/standard/osu_latency \
-	--binary-args "-i 20000"
+	--binary-args "-m 1:1048576 -i 20000"
 ```
 
 Move the output to folder `data/osu/host` if you did not specify it already in `--basedir`.
