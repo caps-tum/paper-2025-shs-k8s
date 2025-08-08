@@ -89,8 +89,16 @@ def active_jobs(measurements: list[Measurement],
                 x_locator_minor = matplotlib.dates.SecondLocator(interval=1),
                 y_locator_major = matplotlib.ticker.AutoLocator(),
                 y_locator_minor = matplotlib.ticker.MultipleLocator(10),
-                figsize: tuple[int,int] = (12,6)):
+                figsize: tuple[int,int] = (12,6),
+                markers: Optional[list[str]] = None,
+                markersize: Optional[float] = None,
+                zorders: Optional[list[int]] = None):
     fig, ax = plt.subplots(figsize=figsize)
+
+    if not isinstance(zorders, list):
+        zorders = [10,10]
+    if not isinstance(markers, list):
+        markers = ["o","s"]
 
     for mi, measurement in enumerate(measurements):
         df = measurement.to_df()
@@ -117,12 +125,13 @@ def active_jobs(measurements: list[Measurement],
         y = raster_data.reshape((raster_data.shape[0], raster_data.shape[1])).mean(axis=0)
         x = [datetime.datetime(2000,1,1) + datetime.timedelta(seconds=i)
                  for i in range(len(y))]
-        ax.plot(x, y, label=measurement.type)
+        ax.plot(x, y, label=measurement.type, marker=markers[mi % len(markers)], markersize=markersize,
+                zorder=zorders[mi % len(zorders)])
 
         y05 = np.quantile(raster_data, 0.05, axis=0)
         y95 = np.quantile(raster_data, 0.95, axis=0)
 
-        ax.fill_between(x, y05, y95, alpha=0.1)
+        ax.fill_between(x, y05, y95, alpha=0.2)
 
     if ramp:
         df = measurements[0].to_df()
@@ -135,7 +144,7 @@ def active_jobs(measurements: list[Measurement],
 
         ax2: plt.Axes = ax.twinx()
         ax2.plot(start_times, batch_sizes, color="tab:green",
-                 label="# jobs", marker=".",zorder=3)
+                 label="# jobs", marker="v", markersize=markersize, zorder=3)
         ax2.set_ylabel("Submitted Jobs per Batch")
 
         lines, labels = ax.get_legend_handles_labels()
@@ -222,7 +231,13 @@ def job_delay_batch(measurements: list[Measurement],
                     y_locator_major=matplotlib.ticker.MultipleLocator(5*1e9),
                     y_locator_minor=matplotlib.ticker.MultipleLocator(1*1e9),
                     legend_ncols = 3,
-                    figsize: tuple[int,int] = (12,6)):
+                    figsize: tuple[int,int] = (12,6),
+                    markers: Optional[list[str]] = None,
+                    markersize: Optional[float] = None,):
+
+    if not isinstance(markers, list):
+        markers = ["o","s"]
+
     fig, ax = plt.subplots(figsize=figsize)
     for mi, measurement in enumerate(measurements):
 
@@ -235,8 +250,8 @@ def job_delay_batch(measurements: list[Measurement],
             y05 = df.groupby("batch_id")["delay"].quantile(0.05)
             y95 = df.groupby("batch_id")["delay"].quantile(0.95)
 
-            ax.plot(y, label=measurement.type, marker=".")
-            ax.fill_between(list(range(len(y))), y05, y95,alpha=0.1)
+            ax.plot(y, label=measurement.type, marker=markers[mi % len(markers)], markersize=markersize)
+            ax.fill_between(list(range(len(y))), y05, y95,alpha=0.2)
 
     if ramp:
         df = measurements[0].to_df()
@@ -248,7 +263,7 @@ def job_delay_batch(measurements: list[Measurement],
 
         ax2: plt.Axes = ax.twinx()
         ax2.plot(start_times, batch_sizes, color="tab:green",
-                 label="# jobs", marker=".", zorder=3)
+                 label="# jobs", marker="v", markersize=markersize, zorder=3)
         ax2.set_ylabel("Submitted Jobs per Batch")
 
         lines, labels = ax.get_legend_handles_labels()
@@ -344,7 +359,8 @@ def lineplot_osu(run_baseline: OSURun,
                  figsize: tuple[int, int] = (12, 8),
                  y_log_base: int = 10,
                  y_max: Optional[float] = None,
-                 fname: Optional[str] = None):
+                 fname: Optional[str] = None,
+                 markers: Optional[[list[str]]] = None):
     """
     Visualise benchmark Runs as linesplot.
 
@@ -364,6 +380,9 @@ def lineplot_osu(run_baseline: OSURun,
     """
     if not isinstance(metric, list):
         metric = [metric]
+
+    if not isinstance(markers, list):
+        markers = ["o","s","v"]
 
     fig, ax = plt.subplots(ncols=1, figsize=figsize)
 
@@ -406,7 +425,7 @@ def lineplot_osu(run_baseline: OSURun,
                 speedup_min = (np.quantile(data_b, q=error_q, axis=1) / data_baseline_mean) - 1
                 speedup_max = (np.quantile(data_b, q=1 - error_q, axis=1) / data_baseline_mean) - 1
 
-            ax.plot(speedup, label=f"{run.tag}", marker=".")
+            ax.plot(speedup, label=f"{run.tag}", marker=markers[r_i % len(markers)])
             _metric_name = f"overhead"
             ax.fill_between(np.arange(len(speedup)), speedup_min, speedup_max, alpha=.25)
             ax.yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(xmax=1, decimals=y_decimals))
@@ -424,7 +443,7 @@ def lineplot_osu(run_baseline: OSURun,
                         y=data_mean,
                         yerr=[np.clip(data_mean - np.min(data, axis=1), a_min=0, a_max=None),
                               np.clip(np.max(data, axis=1) - data_mean, a_min=0, a_max=None)],
-                        label=f"{r.tag}", marker=".")
+                        label=f"{r.tag}", marker=markers[r_i % len(markers)])
             ax.set_yscale("log", base=y_log_base)
             ax.set_ylim(bottom=1)
 
@@ -434,7 +453,6 @@ def lineplot_osu(run_baseline: OSURun,
     ax.set_xticks(np.arange(orig_shape[0]), xlabels_fmt, rotation=45, ha="right")
     ax.yaxis.set_minor_locator(y_minor_locator)
     ax.yaxis.set_major_locator(y_major_locator)
-
 
     if title:
         ax.set_title(run_baseline.name.split(" ")[0])

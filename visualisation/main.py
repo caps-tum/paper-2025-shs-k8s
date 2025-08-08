@@ -27,6 +27,7 @@ def ramp(basepath_data: pathlib.Path,
                                         x_locator_major=matplotlib.dates.SecondLocator([5 * i for i in range(60 // 5)]),
                                         x_locator_minor=matplotlib.dates.SecondLocator(range(60)),
                                         y_locator_minor=matplotlib.ticker.MultipleLocator(5),
+                                        markersize=5,
                                         )
     # Figure 10
     visualisation.visualise.job_delay_batch([m2, m1],
@@ -63,6 +64,8 @@ def spike(basepath_data: pathlib.Path,
                                         x_locator_major=matplotlib.dates.SecondLocator([15,30,45,0]),
                                         x_locator_minor=matplotlib.dates.SecondLocator([5*i for i in range(60//5)]),
                                         y_locator_minor=matplotlib.ticker.MultipleLocator(25),
+                                        markersize=2,
+                                        zorders=[15,10]
                                         )
 
     # Figure 12b
@@ -116,22 +119,21 @@ def osu(basepath_data: pathlib.Path, basepath_figures: pathlib.Path, save: bool)
 
     # Figure 6
     visualisation.visualise.lineplot_osu(
-        run_baseline=host_lat,
+        run_baseline=host_bw,
         run_b=[
-            container_lat_vni,
-            container_lat,
-            host_lat,
+            container_bw_vni,
+            container_bw,
+            host_bw,
         ],
         basepath=basepath_figures, save=save, title=False, figsize=(12, 5),
-        mode="speedup",
-        metric="Latency (us)",
-        metric_name="Overhead",
-        xlabel="Packet Size",
+        mode="speedup_inverse",
         y_decimals=0,
-        y_lim=(-.012, .012),
+        y_lim=(-.018, .015),
         y_major_locator=matplotlib.ticker.MultipleLocator(0.01),
-        y_minor_locator=matplotlib.ticker.MultipleLocator(0.001),
-        # metric_name="Latency Δ (μs)",
+        y_minor_locator=matplotlib.ticker.MultipleLocator(0.002),
+        metric_name="Overhead",
+        metric="Bandwidth (MB/s)",
+        xlabel="Packet Size",
     )
 
     # Figure 7
@@ -154,24 +156,23 @@ def osu(basepath_data: pathlib.Path, basepath_figures: pathlib.Path, save: bool)
 
     # Figure 8
     visualisation.visualise.lineplot_osu(
-            run_baseline=host_bw,
-            run_b=[
-                container_bw_vni,
-                container_bw,
-                host_bw,
-            ],
-            basepath=basepath_figures, save=save, title=False, figsize=(12,5),
-            mode="speedup_inverse",
-            y_decimals=0,
-            y_lim=(-.018,.015),
-            y_major_locator=matplotlib.ticker.MultipleLocator(0.01),
-            y_minor_locator=matplotlib.ticker.MultipleLocator(0.001),
-            metric_name="Overhead",
-            metric="Bandwidth (MB/s)",
-            xlabel="Packet Size",
-        )
-
-
+        run_baseline=host_lat,
+        run_b=[
+            container_lat_vni,
+            container_lat,
+            host_lat,
+        ],
+        basepath=basepath_figures, save=save, title=False, figsize=(12, 5),
+        mode="speedup",
+        metric="Latency (us)",
+        metric_name="Overhead",
+        xlabel="Packet Size",
+        y_decimals=0,
+        y_lim=(-.013, .013),
+        y_major_locator=matplotlib.ticker.MultipleLocator(0.01),
+        y_minor_locator=matplotlib.ticker.MultipleLocator(0.002),
+        # metric_name="Latency Δ (μs)",
+    )
 
 
     # container_bw_get_vni = visualisation.loader.load_osu(folder="measurements_lm-mpi-job-mpilauncher-0_osu_get_bw_25-08-05T1058",
@@ -208,5 +209,5 @@ if __name__ == '__main__':
     save = True
 
     osu(basepath_data=basepath_data, basepath_figures=basepath_figures / "osu", save=save)
-    # ramp(basepath_data=basepath_data, basepath_figures=basepath_figures / "ramp", save=save)
-    # spike(basepath_data=basepath_data, basepath_figures=basepath_figures / "spike", save=save)
+    ramp(basepath_data=basepath_data, basepath_figures=basepath_figures / "ramp", save=save)
+    spike(basepath_data=basepath_data, basepath_figures=basepath_figures / "spike", save=save)
