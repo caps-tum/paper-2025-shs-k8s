@@ -1,521 +1,16 @@
 Subject: [PATCH] cxi: add plugin for HPE Cray Slingshot
 This CNI plugin handles creation and deletion of CXI services on host. It expects a VNI service to run on the cluster which assigns VNIs to pods.
 ---
-Index: plugins/cxi/sample_suite_test.go
+Index: plugins/cxi/cxi_linux_test.go
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
-diff --git a/plugins/cxi/sample_suite_test.go b/plugins/cxi/sample_suite_test.go
+diff --git a/plugins/cxi/cxi_linux_test.go b/plugins/cxi/cxi_linux_test.go
 new file mode 100644
---- /dev/null	(date 1742555422067)
-+++ b/plugins/cxi/sample_suite_test.go	(date 1742555422067)
-@@ -0,0 +1,15 @@
-+// The boilerplate needed for Ginkgo
-+
-+package main
-+
-+import (
-+	"testing"
-+
-+	. "github.com/onsi/ginkgo/v2"
-+	. "github.com/onsi/gomega"
-+)
-+
-+func TestCXI(t *testing.T) {
-+	RegisterFailHandler(Fail)
-+	RunSpecs(t, "plugins/cxi")
-+}
-Index: build_linux.sh
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
-diff --git a/build_linux.sh b/build_linux.sh
---- a/build_linux.sh	(revision 7f756b411efc3d3730c707e2cc1f2baf1a66e28c)
-+++ b/build_linux.sh	(date 1742555422065)
-@@ -11,7 +11,9 @@
- mkdir -p "${PWD}/bin"
- 
- echo "Building plugins ${GOOS}"
--PLUGINS="plugins/meta/* plugins/main/* plugins/ipam/*"
-+#PLUGINS="plugins/meta/* plugins/main/* plugins/ipam/*"
-+#PLUGINS="plugins/cxi plugins/main/ptp plugins/ipam/host-local"
-+PLUGINS="plugins/cxi"
- for d in $PLUGINS; do
- 	if [ -d "$d" ]; then
- 		plugin="$(basename "$d")"
-Index: plugins/cxi/cxi_wrapper.h
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
-diff --git a/plugins/cxi/cxi_wrapper.h b/plugins/cxi/cxi_wrapper.h
-new file mode 100644
---- /dev/null	(date 1745140732100)
-+++ b/plugins/cxi/cxi_wrapper.h	(date 1745140732100)
-@@ -0,0 +1,12 @@
-+// include these, otherwise GCC gets mad at libcxi.h (it has missing includes)
-+#include <stdio.h>
-+#include <string.h>
-+#include <time.h>
-+#include <libcxi/libcxi.h>
-+
-+#include <stdlib.h>
-+#include <unistd.h>
-+#include <stdint.h>
-+
-+int alloc_svc(uint64_t netns, uint16_t *vnis, size_t num_vnis, uint16_t *svcs, size_t num_svcs);
-+int destroy_svc(uint64_t netns);
-\ No newline at end of file
-Index: plugins/cxi/main.go
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
-diff --git a/plugins/cxi/main.go b/plugins/cxi/main.go
-new file mode 100644
---- /dev/null	(date 1745140518641)
-+++ b/plugins/cxi/main.go	(date 1745140518641)
-@@ -0,0 +1,374 @@
-+// Copyright 2017 CNI authors
-+//
-+// Licensed under the Apache License, Version 2.0 (the "License");
-+// you may not use this file except in compliance with the License.
-+// You may obtain a copy of the License at
-+//
-+//     http://www.apache.org/licenses/LICENSE-2.0
-+//
-+// Unless required by applicable law or agreed to in writing, software
-+// distributed under the License is distributed on an "AS IS" BASIS,
-+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-+// See the License for the specific language governing permissions and
-+// limitations under the License.
-+
-+// This is a sample chained plugin that supports multiple CNI versions. It
-+// parses prevResult according to the cniVersion
-+package main
-+
-+import (
-+	"context"
-+	"encoding/json"
-+	"errors"
-+	"fmt"
-+	"github.com/containernetworking/cni/pkg/skel"
-+	"github.com/containernetworking/cni/pkg/types"
-+	current "github.com/containernetworking/cni/pkg/types/100"
-+	"github.com/containernetworking/cni/pkg/version"
-+	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
-+	"github.com/tidwall/gjson"
-+	_ "k8s.io/apimachinery/pkg/api/errors"
-+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-+	"k8s.io/client-go/kubernetes"
-+	"k8s.io/client-go/tools/clientcmd"
-+	"os"
-+	"regexp"
-+	"strconv"
-+	"strings"
-+	"time"
-+)
-+
-+import (
-+	netns2 "github.com/vishvananda/netns"
-+)
-+
-+var ErrNoVNIRequested = errors.New("no VNI requested")
-+var ErrNoOwningEntity = errors.New("no owning entity")
-+var ErrNoVNICreated = errors.New("no VNI created")
-+
-+// PluginConf is whatever you expect your configuration json to be. This is whatever
-+// is passed in on stdin. Your plugin may wish to expose its functionality via
-+// runtime args, see CONVENTIONS.md in the CNI spec.
-+type PluginConf struct {
-+	// This embeds the standard NetConf structure which allows your plugin
-+	// to more easily parse standard fields like Name, Type, CNIVersion,
-+	// and PrevResult.
-+	types.NetConf
-+	RuntimeConfig *struct {
-+		SampleConfig map[string]interface{} `json:"cxi"`
-+	} `json:"runtimeConfig"`
-+}
-+
-+// parseConfig parses the supplied configuration (and prevResult) from stdin.
-+func parseConfig(stdin []byte) (*PluginConf, error) {
-+	conf := PluginConf{}
-+
-+	if err := json.Unmarshal(stdin, &conf); err != nil {
-+		return nil, fmt.Errorf("failed to parse network configuration: %v", err)
-+	}
-+
-+	// Parse previous result. This will parse, validate, and place the
-+	// previous result object into conf.PrevResult. If you need to modify
-+	// or inspect the PrevResult you will need to convert it to a concrete
-+	// versioned Result struct.
-+	if err := version.ParsePrevResult(&conf.NetConf); err != nil {
-+		return nil, fmt.Errorf("could not parse prevResult: %v", err)
-+	}
-+	// End previous result parsing
-+
-+	// Do any validation here
-+	//if conf.AnotherAwesomeArg == "" {
-+	//	return nil, fmt.Errorf("anotherAwesomeArg must be specified")
-+	//}
-+
-+	return &conf, nil
-+}
-+
-+func buildClient() (*kubernetes.Clientset, error) {
-+	config, err := clientcmd.BuildConfigFromFlags("", "/etc/rancher/k3s/k3s.yaml")
-+	if err != nil {
-+		return nil, err
-+	}
-+	return kubernetes.NewForConfig(config)
-+}
-+
-+func getNetnsInode(netns string) (uint64, error) {
-+	handle, err := netns2.GetFromPath(netns)
-+	if err != nil {
-+		return 0, err
-+	}
-+	uniqueId := handle.UniqueId()
-+	re := regexp.MustCompile(`NS\(\d*:(\d+)\)`)
-+	inodeReg := re.FindStringSubmatch(uniqueId)
-+	if len(inodeReg) == 2 {
-+		inode, err := strconv.ParseUint(inodeReg[1], 10, 64)
-+		if err != nil {
-+			return 0, err
-+		}
-+		return inode, nil
-+	}
-+	return 0, fmt.Errorf("did not find inode in unique id: %s", uniqueId)
-+}
-+
-+// cmdAdd is called for ADD requests
-+// Responsible for fetching a VNI and creating & configuring the CXI service
-+func cmdAdd(args *skel.CmdArgs) error {
-+	conf, err := parseConfig(args.StdinData)
-+	if err != nil {
-+		return err
-+	}
-+
-+	// A plugin can be either an "originating" plugin or a "chained" plugin.
-+	// Originating plugins perform initial sandbox setup and do not require
-+	// any result from a previous plugin in the chain. A chained plugin
-+	// modifies sandbox configuration that was previously set up by an
-+	// originating plugin and may optionally require a PrevResult from
-+	// earlier plugins in the chain.
-+
-+	// START chained plugin code
-+	if conf.PrevResult == nil {
-+		return fmt.Errorf("must be called as chained plugin")
-+	}
-+
-+	// Convert the PrevResult to a concrete Result type that can be modified.
-+	prevResult, err := current.GetResult(conf.PrevResult)
-+	if err != nil {
-+		return fmt.Errorf("failed to convert prevResult: %v", err)
-+	}
-+
-+	// Pass the prevResult through this plugin to the next one
-+	result := prevResult
-+
-+	fi, err := os.OpenFile("/tmp/cxi_cni", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
-+	if err != nil {
-+		return fmt.Errorf("error opening /tmp/cxi_cni: %v\n", err)
-+	}
-+	defer fi.Close()
-+
-+	fi.WriteString(fmt.Sprintf("[%s] added: %s %s %s %s\n",
-+		time.Now(),
-+		args.ContainerID, args.IfName, args.Netns, args.Path))
-+	fi.WriteString(fmt.Sprintf("  %s\n", args.Args))
-+
-+	subargs := strings.Split(args.Args, ";")
-+	subargMap := map[string]string{}
-+	for _, arg := range subargs {
-+		components := strings.Split(arg, "=")
-+		subargMap[components[0]] = components[1]
-+	}
-+
-+	// the netns (numeric) ID is the same as the inode of the netns directory
-+	netnsInode, err := getNetnsInode(args.Netns)
-+
-+	if err != nil {
-+		fi.WriteString(fmt.Sprintf("  Error getNetnsInode(): %s\n", err))
-+	} else {
-+		fi.WriteString(fmt.Sprintf("  netnsInode: %d\n", netnsInode))
-+	}
-+
-+	fi.WriteString(fmt.Sprintf("  getting VNI: \n"))
-+	vni, err := getVNI(err, subargMap)
-+
-+	if err != nil {
-+		if errors.Is(err, ErrNoVNICreated) {
-+			fi.WriteString(fmt.Sprintf("  Error getVNI(): %s\n", err))
-+			return fmt.Errorf("no VNI was created: %v", err)
-+		}
-+		//if errors.Is(err, ErrNoVNIRequested) || errors.Is(err, ErrNoOwningEntity) {
-+		fi.WriteString(fmt.Sprintf("  accepted error: %s\n", err))
-+		return types.PrintResult(result, conf.CNIVersion)
-+		//}
-+
-+	}
-+	fi.WriteString(fmt.Sprintf("  vni: %d\n", vni))
-+
-+	svcs, err := createService(netnsInode, []uint16{vni})
-+	if err != nil {
-+		fi.WriteString(fmt.Sprintf("  Error during CXI service creation: %v+\n", err))
-+		return err
-+	}
-+	fi.WriteString(fmt.Sprintf("  created CXI service(s) for netns %d: %v\n", netnsInode, svcs))
-+
-+	// Pass through the result for the next plugin
-+	return types.PrintResult(result, conf.CNIVersion)
-+}
-+
-+// Given the kubernetes arguments such as pod name or namespace, fetch the VNI pre-allocated for that pod
-+// Note that this queries the node-local Kubernetes API in order to receive the owning Resource (i.e. Job, ReplicaSet, etc.) & attached VNI object
-+func getVNI(err error, subargMap map[string]string) (uint16, error) {
-+	clientset, err := buildClient()
-+	if err != nil {
-+		return 0, fmt.Errorf("error building k8s client: %v", err)
-+	}
-+
-+	// get additional info on pod from k8s api
-+	namespace := subargMap["K8S_POD_NAMESPACE"]
-+	res, err := clientset.CoreV1().Pods(namespace).List(context.TODO(),
-+		metav1.ListOptions{
-+			FieldSelector: fmt.Sprintf("metadata.name=%s", subargMap["K8S_POD_NAME"]),
-+		})
-+	if err != nil {
-+		return 0, fmt.Errorf("error getting pods: %v", err)
-+	}
-+
-+	// extract UID of owning resource
-+	if len(res.Items) == 0 {
-+		return 0, fmt.Errorf("no pods")
-+	}
-+	pod := res.Items[0]
-+
-+	if len(pod.OwnerReferences) == 0 {
-+		return uint16(0), ErrNoOwningEntity
-+	}
-+	owner := pod.OwnerReferences[0]
-+	var ownerAnnotations map[string]string
-+	var terminationGracePeriodSeconds int64
-+	switch fmt.Sprintf("%s/%s", owner.APIVersion, owner.Kind) {
-+	case "batch/v1/Job":
-+		res, err := clientset.BatchV1().Jobs(namespace).Get(context.TODO(), owner.Name, metav1.GetOptions{})
-+		if err != nil {
-+			return 0, err
-+		}
-+		ownerAnnotations = res.Annotations
-+		terminationGracePeriodSeconds = *res.Spec.Template.Spec.TerminationGracePeriodSeconds
-+		break
-+	case "apps/v1/DaemonSet":
-+		res, err := clientset.AppsV1().DaemonSets(namespace).Get(context.TODO(), owner.Name, metav1.GetOptions{})
-+		if err != nil {
-+			return 0, err
-+		}
-+		ownerAnnotations = res.Annotations
-+		terminationGracePeriodSeconds = *res.Spec.Template.Spec.TerminationGracePeriodSeconds
-+		break
-+	case "apps/v1/Deployment":
-+		res, err := clientset.AppsV1().Deployments(namespace).Get(context.TODO(), owner.Name, metav1.GetOptions{})
-+		if err != nil {
-+			return 0, err
-+		}
-+		ownerAnnotations = res.Annotations
-+		terminationGracePeriodSeconds = *res.Spec.Template.Spec.TerminationGracePeriodSeconds
-+		break
-+	case "apps/v1/ReplicaSet":
-+		res, err := clientset.AppsV1().ReplicaSets(namespace).Get(context.TODO(), owner.Name, metav1.GetOptions{})
-+		if err != nil {
-+			return 0, err
-+		}
-+		ownerAnnotations = res.Annotations
-+		terminationGracePeriodSeconds = *res.Spec.Template.Spec.TerminationGracePeriodSeconds
-+		break
-+	default:
-+		// cannot use built-in types, so trying to do it manually
-+
-+		kindConverted := fmt.Sprintf("%ss", strings.ToLower(owner.Kind))
-+		result, err := clientset.RESTClient().
-+			Get().
-+			RequestURI(fmt.Sprintf("/apis/%s/namespaces/%s/%s/%s/", owner.APIVersion, namespace, kindConverted, owner.Name)).
-+			Do(context.TODO()).
-+			Raw()
-+
-+		if err != nil {
-+			return 0, fmt.Errorf("error on rest call: %v", err)
-+		}
-+		annotations := gjson.GetBytes(result, "metadata.annotations").Map()
-+		ownerAnnotations = make(map[string]string)
-+		for k, v := range annotations {
-+			ownerAnnotations[k] = v.String()
-+		}
-+
-+		terminationGracePeriodSeconds = gjson.GetBytes(result, "spec.template.spec.terminationGracePeriodSeconds").Int()
-+	}
-+
-+	fi, err := os.OpenFile("/tmp/cxi_cni", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
-+	if err != nil {
-+		return 0, err
-+	}
-+	defer fi.Close()
-+
-+	if ownerAnnotations == nil {
-+		return 0, ErrNoVNIRequested
-+	}
-+	vniAnnotation, okVni := ownerAnnotations["vni"]
-+	fi.WriteString(fmt.Sprintf("  Annotations for %v: %s\n", owner, vniAnnotation))
-+
-+	if !(okVni && (strings.ToLower(vniAnnotation) == "yes" ||
-+		strings.ToLower(vniAnnotation) == "true")) {
-+		return 0, ErrNoVNIRequested
-+	}
-+
-+	if terminationGracePeriodSeconds > 30 {
-+		return 0, errors.New(fmt.Sprintf("terminationGracePeriodSeconds must be <= 30sec (is: %d)", terminationGracePeriodSeconds))
-+	}
-+	//var vniUid string
-+	vniUid := fmt.Sprintf("vni-%s", owner.UID)
-+
-+	fi.WriteString(fmt.Sprintf("  fetching VNI for %s\n", vniUid))
-+	// fetch VNI from owner if requested
-+	result, err := clientset.RESTClient().
-+		Get().
-+		RequestURI(
-+			fmt.Sprintf("/apis/horizon-opencube.eu/v1/namespaces/%s/vnis/%s", namespace, vniUid)).
-+		Do(context.TODO()).
-+		Raw()
-+
-+	if err != nil {
-+		fi.WriteString(fmt.Sprintf("  error while getting VNI: %s\n", err))
-+		return 0, ErrNoVNICreated
-+	}
-+
-+	vni := gjson.GetBytes(result, "spec.vni").Int()
-+	return uint16(vni), nil
-+}
-+
-+// cmdDel is called for DELETE requests
-+// Responsible for deleting the CXI service
-+func cmdDel(args *skel.CmdArgs) error {
-+	conf, err := parseConfig(args.StdinData)
-+	if err != nil {
-+		return err
-+	}
-+	_ = conf
-+
-+	// Do your delete here
-+	fi, err := os.OpenFile("/tmp/cxi_cni", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
-+	if err != nil {
-+		return fmt.Errorf("error during \"logging\"")
-+	}
-+	defer fi.Close()
-+
-+	fi.WriteString(fmt.Sprintf("[%s] deleted: %s %s %s %s\n",
-+		time.Now(), args.ContainerID, args.IfName, args.Netns, args.Path))
-+	fi.WriteString(fmt.Sprintf("  %s\n", args.Args))
-+
-+	netnsInode, err := getNetnsInode(args.Netns)
-+	if err != nil {
-+		// this can happen if the CXI CNI /del is called multiple times (allowed as per spec)
-+		//  so don't elevate the error here
-+		fi.WriteString(fmt.Sprintf("  Error getting inode: %s\n", err))
-+		return nil
-+	}
-+
-+	fi.WriteString(fmt.Sprintf("  netns_inode: %d\n", netnsInode))
-+
-+	err = destroyService(netnsInode)
-+	if err != nil {
-+		fi.WriteString(fmt.Sprintf("  Error during CXI service deletion: %v+\n", err))
-+		return err
-+	}
-+	fi.WriteString("  deleted service\n")
-+	return nil
-+}
-+
-+func main() {
-+	skel.PluginMain(cmdAdd, cmdCheck, cmdDel, version.All, bv.BuildString("cxi"))
-+}
-+
-+func cmdCheck(_ *skel.CmdArgs) error {
-+	fi, err := os.OpenFile("/tmp/cxi_cni", os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
-+	if err != nil {
-+		return fmt.Errorf("error during \"logging\"")
-+	}
-+	fi.WriteString(fmt.Sprintf("[%s] Called CHECK\n", time.Now()))
-+
-+	defer fi.Close()
-+	return fmt.Errorf("not implemented")
-+}
-Index: plugins/cxi/cxi.go
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
-diff --git a/plugins/cxi/cxi.go b/plugins/cxi/cxi.go
-new file mode 100644
---- /dev/null	(date 1745140581027)
-+++ b/plugins/cxi/cxi.go	(date 1745140581027)
-@@ -0,0 +1,44 @@
-+package main
-+
-+// #cgo CFLAGS: -Wall -I/opt/libcxi-netns/include
-+// #cgo LDFLAGS: -L/opt/libcxi-netns/lib -lcxi
-+/*
-+#include "cxi_wrapper.h"
-+*/
-+import "C"
-+import (
-+	"errors"
-+	"fmt"
-+)
-+
-+// Create CXI Service for given NetNS ID and VNI
-+// Upon service creation, add the netns ID to service member list.
-+// Set restricted_vnis to true and add VNI
-+func createService(netns uint64, vnis []uint16) ([]uint16, error) {
-+	if len(vnis) > 4 {
-+		return nil, errors.New("cannot add more than 4 VNIs")
-+	}
-+
-+	svcs := make([]uint16, 4)
-+	ret := C.alloc_svc(
-+		C.uint64_t(netns),
-+		(*C.uint16_t)(&vnis[0]),
-+		C.size_t(len(vnis)),
-+		(*C.uint16_t)(&svcs[0]),
-+		C.size_t(len(svcs)),
-+	)
-+	if ret < 0 {
-+		return nil, errors.New(fmt.Sprintf("failed to create service for netns %d and vnis %v: %v", netns, vnis, ret))
-+	}
-+	return svcs, nil
-+}
-+
-+// Destroy Service for given NetNS identifier.
-+// Iterates through all CXI services and removes the first service that matches the netns ID.
-+func destroyService(netns uint64) error {
-+	ret := C.destroy_svc(C.uint64_t(netns))
-+	if ret != 0 {
-+		return errors.New(fmt.Sprintf("failed to destroy service for netns %d: %v", netns, ret))
-+	}
-+	return nil
-+}
-Index: plugins/cxi/sample_linux_test.go
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
-diff --git a/plugins/cxi/sample_linux_test.go b/plugins/cxi/sample_linux_test.go
-new file mode 100644
---- /dev/null	(date 1742555422067)
-+++ b/plugins/cxi/sample_linux_test.go	(date 1742555422067)
-@@ -0,0 +1,128 @@
+--- /dev/null	(date 1760624145739)
++++ b/plugins/cxi/cxi_linux_test.go	(date 1760624145739)
+@@ -0,0 +1,96 @@
 +// Copyright 2017 CNI authors
 +//
 +// Licensed under the Apache License, Version 2.0 (the "License");
@@ -556,14 +51,17 @@ new file mode 100644
 +		targetNs.Close()
 +	})
 +
-+	It("Works with a 0.3.0 config", func() {
++	It("Works with a 0.4.0 config", func() {
 +		ifname := "eth0"
 +		conf := `{
-+	"cniVersion": "0.3.0",
++	"cniVersion": "0.4.0",
 +	"name": "cni-plugin-cxi-test",
 +	"type": "cxi",
++	"log_dir": "/tmp/cxi_cni_log_test",
++	"log_mode": "0600",
++	"enable_log": true,
 +	"prevResult": {
-+		"cniVersion": "0.3.0",
++		"cniVersion": "0.4.0",
 +		"interfaces": [
 +			{
 +				"name": "%s",
@@ -592,46 +90,11 @@ new file mode 100644
 +		Expect(err).NotTo(HaveOccurred())
 +	})
 +
-+	//	It("fails an invalid config", func() {
-+	//		conf := `{
-+	//	"cniVersion": "0.3.0",
-+	//	"name": "cni-plugin-cxi-test",
-+	//	"type": "cxi",
-+	//	"prevResult": {
-+	//		"interfaces": [
-+	//			{
-+	//				"name": "eth0",
-+	//				"sandbox": "/var/run/netns/test"
-+	//			}
-+	//		],
-+	//		"ips": [
-+	//			{
-+	//				"version": "4",
-+	//				"address": "10.0.0.2/24",
-+	//				"gateway": "10.0.0.1",
-+	//				"interface": 0
-+	//			}
-+	//		],
-+	//		"routes": []
-+	//	}
-+	//}`
-+	//
-+	//		args := &skel.CmdArgs{
-+	//			ContainerID: "dummy",
-+	//			Netns:       targetNs.Path(),
-+	//			IfName:      "eth0",
-+	//			StdinData:   []byte(conf),
-+	//		}
-+	//		_, _, err := testutils.CmdAddWithArgs(args, func() error { return cmdAdd(args) })
-+	//		Expect(err).To(MatchError("anotherAwesomeArg must be specified"))
-+	//	})
-+
 +	It("fails with CNI spec versions that don't support plugin chaining", func() {
 +		conf := `{
 +	"cniVersion": "0.2.0",
 +	"name": "cni-plugin-cxi-test",
-+	"type": "cxi",
-+	"anotherAwesomeArg": "foo"
++	"type": "cxi"
 +}`
 +
 +		args := &skel.CmdArgs{
@@ -644,68 +107,17 @@ new file mode 100644
 +		Expect(err).To(MatchError("must be called as chained plugin"))
 +	})
 +})
-Index: plugins/cxi/README.md
+Index: plugins/cxi/libcxi_wrapper.c
 IDEA additional info:
 Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
 <+>UTF-8
 ===================================================================
-diff --git a/plugins/cxi/README.md b/plugins/cxi/README.md
+diff --git a/plugins/cxi/libcxi_wrapper.c b/plugins/cxi/libcxi_wrapper.c
 new file mode 100644
---- /dev/null	(date 1742555422066)
-+++ b/plugins/cxi/README.md	(date 1742555422066)
-@@ -0,0 +1,41 @@
-+# CXI CNI plugin
-+
-+This is a prototype implementation of the HPE Cray Slingshot 11 CXI CNI Plugin.
-+It is responsible for creating and deleting CXI services for each requesting pod/namespace.
-+It uses a patched CXI driver & library stack, which adds NetworkNamespace support for the CXI member checks.
-+
-+In this version, the plugin expects to be executed within a Kubernetes deployment for VNI management.
-+
-+## Architecture
-+
-+The CXI CNI plugin is a chained CNI plugin, meaning it is usually applied in conjunction with other non-chained CNI plugins.
-+The CXI CNI plugin does not create new interfaces, but only modifies the node-level CXI services based on incoming and deleted pods/namespaces.
-+
-+
-+### Command-Add
-+During creation, the plugin extracts the network namespace inode ID from the given network namespace. 
-+Based on this ID, it fetches the pre-configured VNI from the kubelet running on the node. This is achieved via a REST request.
-+Fetching the VNI involves a lookup of details of the pod currently under construction. 
-+If either the pod is annotated with `needs-global-vni: yes`, or the owning resource of that pod is annotated with `needs-vni: yes`, then another lookup
-+is performed against kubernetes searching for the respective VNI custom resource.
-+
-+Note that in order to determine the owner of the pod, two code paths are implemented: 
-+
-+(1) If the owner API Version and Kind (read: the type) are known to be Job, DaemonSet, Deployment, or ReplicaSet, then 
-+the client-go native support for these resources is used to perform a structured lookup.
-+(2) If the owner type is not known (can be the case for custom resources such as volcano.sh-Jobs), then a raw request against
-+`/apis/$apiVersion/namespaces/$ns/$kind/$ownerName` is performed. While `$apiVersion`, `$ns`, and `$ownerName` are known and directly
-+taken from the kubelet-provided information, `$kind` needs to be converted. 
-+This is due to the naming convention of Kubernetes: The kubelet-response returns the "singular", e.g. "Job", whereas the 
-+API expects the lower-case plural, in this case "jobs". Whether all custom resources adhere to this convention is not guaranteed and 
-+the lookup is performed in a best-effort manner.
-+
-+Once the VNI has been extracted, a new CXI service with that VNI and namespace ID is configured for all present CXI devices.
-+
-+### Command-Del
-+
-+During deletion, the plugin extracts the network namespace inode ID from the given network namespace and uses it to delete
-+all CXI services associated with that netns-ID for all present CXI devices. 
-+Note that under normal circumstances, only one CXI service should exist per netns-ID. 
-+If more exist however, deletion of all services is still warranted since the network namespace in question is about to be deleted, rendering
-+all CXI services configured against this netns stale and prone to ID-reuse-scenarios.
-Index: plugins/cxi/cxi_wrapper.c
-IDEA additional info:
-Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
-<+>UTF-8
-===================================================================
-diff --git a/plugins/cxi/cxi_wrapper.c b/plugins/cxi/cxi_wrapper.c
-new file mode 100644
---- /dev/null	(date 1745141671853)
-+++ b/plugins/cxi/cxi_wrapper.c	(date 1745141671853)
+--- /dev/null	(date 1760609009047)
++++ b/plugins/cxi/libcxi_wrapper.c	(date 1760609009047)
 @@ -0,0 +1,188 @@
-+#include "cxi_wrapper.h"
++#include "libcxi_wrapper.h"
 +
 +// code inspired from slurm code
 +// https://github.com/SchedMD/slurm/blob/master/src/plugins/switch/hpe_slingshot/setup_nic.c
@@ -894,3 +306,613 @@ new file mode 100644
 +    return 0;
 +}
 \ No newline at end of file
+Index: plugins/cxi/libcxi_wrapper.h
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/plugins/cxi/libcxi_wrapper.h b/plugins/cxi/libcxi_wrapper.h
+new file mode 100644
+--- /dev/null	(date 1760538277881)
++++ b/plugins/cxi/libcxi_wrapper.h	(date 1760538277881)
+@@ -0,0 +1,12 @@
++// include these, otherwise GCC gets mad at libcxi.h (it has missing includes)
++#include <stdio.h>
++#include <string.h>
++#include <time.h>
++#include <libcxi/libcxi.h>
++
++#include <stdlib.h>
++#include <unistd.h>
++#include <stdint.h>
++
++int alloc_svc(uint64_t netns, uint16_t *vnis, size_t num_vnis, uint16_t *svcs, size_t num_svcs);
++int destroy_svc(uint64_t netns);
+\ No newline at end of file
+Index: plugins/cxi/cxi_suite_test.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/plugins/cxi/cxi_suite_test.go b/plugins/cxi/cxi_suite_test.go
+new file mode 100644
+--- /dev/null	(date 1760538277882)
++++ b/plugins/cxi/cxi_suite_test.go	(date 1760538277882)
+@@ -0,0 +1,15 @@
++// The boilerplate needed for Ginkgo
++
++package main
++
++import (
++	"testing"
++
++	. "github.com/onsi/ginkgo/v2"
++	. "github.com/onsi/gomega"
++)
++
++func TestCXI(t *testing.T) {
++	RegisterFailHandler(Fail)
++	RunSpecs(t, "plugins/cxi")
++}
+Index: plugins/cxi/cxi.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/plugins/cxi/cxi.go b/plugins/cxi/cxi.go
+new file mode 100644
+--- /dev/null	(date 1760609009156)
++++ b/plugins/cxi/cxi.go	(date 1760609009156)
+@@ -0,0 +1,44 @@
++package main
++
++// #cgo CFLAGS: -Wall -I/opt/libcxi-netns/include
++// #cgo LDFLAGS: -L/opt/libcxi-netns/lib -lcxi
++/*
++#include "libcxi_wrapper.h"
++*/
++import "C"
++import (
++	"errors"
++	"fmt"
++)
++
++// Create CXI Service for given NetNS ID and VNI
++// Upon service creation, add the netns ID to service member list.
++// Set restricted_vnis to true and add VNI
++func createService(netns uint64, vnis []uint16) ([]uint16, error) {
++	if len(vnis) > 4 {
++		return nil, errors.New("cannot add more than 4 VNIs")
++	}
++
++	svcs := make([]uint16, 4)
++	ret := C.alloc_svc(
++		C.uint64_t(netns),       /* uint64_t netns */
++		(*C.uint16_t)(&vnis[0]), /* uint16_t *vnis */
++		C.size_t(len(vnis)),     /* size_t num_vnis */
++		(*C.uint16_t)(&svcs[0]), /* uint16_t *svcs */
++		C.size_t(len(svcs)),     /* size_t num_svcs */
++	)
++	if ret < 0 {
++		return nil, errors.New(fmt.Sprintf("failed to create service for netns %d and vnis %v: %v", netns, vnis, ret))
++	}
++	return svcs, nil
++}
++
++// Destroy Service for given NetNS identifier.
++// Iterates through all CXI services and removes the first service that matches the netns ID.
++func destroyService(netns uint64) error {
++	ret := C.destroy_svc(C.uint64_t(netns))
++	if ret != 0 {
++		return errors.New(fmt.Sprintf("failed to destroy service for netns %d: %v", netns, ret))
++	}
++	return nil
++}
+Index: plugins/cxi/README.md
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/plugins/cxi/README.md b/plugins/cxi/README.md
+new file mode 100644
+--- /dev/null	(date 1760704883643)
++++ b/plugins/cxi/README.md	(date 1760704883643)
+@@ -0,0 +1,81 @@
++# CXI CNI plugin
++
++This is a prototype implementation of the HPE Cray Slingshot 11 CXI CNI Plugin.
++It is responsible for creating and deleting CXI services for each requesting pod/namespace.
++It uses a patched CXI driver & library stack, which adds NetworkNamespace support for the CXI member checks.
++
++In this version, the plugin expects to be executed within a Kubernetes deployment for VNI management.
++
++## Configuration
++
++The CXI CNI Plugin has the following configuration options:
++
++- `EnableLog`: bool, set true if plugin should log operations to disk (default: `false`)
++- `LogDir`: string, path to file for logs (default: `"/tmp/cxi_cni.log"`)
++- `LogMode`: string, file mode for log, in octal (default: `"0600"`)
++- `KubeConfigPath`: string, path to config for k8s client (default: `"/etc/rancher/k3s/k3s.yaml"`)
++
++Set these in your CNI configuration. Example configuration using flannel:
++
++```json
++{
++  "name": "cbr0",
++  "cniVersion": "0.4.0",
++  "plugins": [
++    {
++      "type": "flannel",
++      "delegate": {
++        "hairpinMode": true,
++        "isDefaultGateway": true
++      }
++    },
++    {
++      "type": "portmap",
++      "capabilities": {
++        "portMappings": true
++      }
++    },
++    {
++      "type": "cxi",
++      "enable_log": true,
++      "log_dir": "/tmp/cxi_cni.log",
++      "log_mode": "0600",
++      "kube_config_path": "/etc/rancher/k3s/k3s.yaml"
++    }
++  ]
++}
++```
++
++## Architecture
++
++The CXI CNI plugin is a chained CNI plugin, meaning it is usually applied in conjunction with other non-chained CNI plugins.
++The CXI CNI plugin does not create new interfaces, but only modifies the node-level CXI services based on incoming and deleted pods/namespaces.
++
++
++### Command-Add
++During creation, the plugin extracts the network namespace inode ID from the given network namespace. 
++Based on this ID, it fetches the pre-configured VNI from the kubelet running on the node. This is achieved via a REST request.
++Fetching the VNI involves a lookup of details of the pod currently under construction. 
++If either the pod is annotated with `needs-global-vni: yes`, or the owning resource of that pod is annotated with `needs-vni: yes`, then another lookup
++is performed against kubernetes searching for the respective VNI custom resource.
++
++Note that in order to determine the owner of the pod, two code paths are implemented: 
++
++(1) If the owner API Version and Kind (read: the type) are known to be Job, DaemonSet, Deployment, or ReplicaSet, then 
++the client-go native support for these resources is used to perform a structured lookup.
++(2) If the owner type is not known (can be the case for custom resources such as volcano.sh-Jobs), then a raw request against
++`/apis/$apiVersion/namespaces/$ns/$kind/$ownerName` is performed. While `$apiVersion`, `$ns`, and `$ownerName` are known and directly
++taken from the kubelet-provided information, `$kind` needs to be converted. 
++This is due to the naming convention of Kubernetes: The kubelet-response returns the "singular", e.g. "Job", whereas the 
++API expects the lower-case plural, in this case "jobs". Whether all custom resources adhere to this convention is not guaranteed and 
++the lookup is performed in a best-effort manner.
++
++Once the VNI has been extracted, a new CXI service with that VNI and namespace ID is configured for all present CXI devices.
++
++### Command-Del
++
++During deletion, the plugin extracts the network namespace inode ID from the given network namespace and uses it to delete
++all CXI services associated with that netns-ID for all present CXI devices. 
++Note that under normal circumstances, only one CXI service should exist per netns-ID. 
++If more exist however, deletion of all services is still warranted since the network namespace in question is about to be deleted, rendering
++all CXI services configured against this netns stale and prone to ID-reuse-scenarios.
+Index: plugins/cxi/main.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/plugins/cxi/main.go b/plugins/cxi/main.go
+new file mode 100644
+--- /dev/null	(date 1760704883637)
++++ b/plugins/cxi/main.go	(date 1760704883637)
+@@ -0,0 +1,407 @@
++// Copyright 2017 CNI authors
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// This is a sample chained plugin that supports multiple CNI versions. It
++// parses prevResult according to the cniVersion
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"os"
++	"regexp"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/containernetworking/cni/pkg/skel"
++	"github.com/containernetworking/cni/pkg/types"
++	current "github.com/containernetworking/cni/pkg/types/100"
++	"github.com/containernetworking/cni/pkg/version"
++	bv "github.com/containernetworking/plugins/pkg/utils/buildversion"
++	"github.com/tidwall/gjson"
++	_ "k8s.io/apimachinery/pkg/api/errors"
++	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
++	"k8s.io/client-go/kubernetes"
++	"k8s.io/client-go/tools/clientcmd"
++)
++
++import (
++	netns2 "github.com/vishvananda/netns"
++)
++
++const (
++	defaultEnableLog      = false
++	defaultLogMode        = "0600"
++	defaultLogDir         = "/tmp/cxi_cni.log"
++	defaultKubeConfigPath = "/etc/rancher/k3s/k3s.yaml"
++)
++
++var ErrNoVNIRequested = errors.New("no VNI requested")
++var ErrNoOwningEntity = errors.New("no owning entity")
++var ErrNoVNICreated = errors.New("no VNI created")
++
++var Logfile *os.File
++
++// PluginConf is whatever you expect your configuration json to be. This is whatever
++// is passed in on stdin. Your plugin may wish to expose its functionality via
++// runtime args, see CONVENTIONS.md in the CNI spec.
++type PluginConf struct {
++	// This embeds the standard NetConf structure which allows your plugin
++	// to more easily parse standard fields like Name, Type, CNIVersion,
++	// and PrevResult.
++	types.NetConf
++	EnableLog      bool   `json:"enable_log"`
++	LogDir         string `json:"log_dir"`
++	LogMode        string `json:"log_mode"`
++	KubeConfigPath string `json:"kube_config_path"`
++
++	RuntimeConfig *struct {
++		CXI map[string]interface{} `json:"cxi,omitempty"`
++	} `json:"runtimeConfig,omitempty"`
++}
++
++// parseConfig parses the supplied configuration (and prevResult) from stdin.
++func parseConfig(stdin []byte) (*PluginConf, error) {
++	conf := PluginConf{
++		EnableLog:      defaultEnableLog,
++		LogDir:         defaultLogDir,
++		LogMode:        defaultLogMode,
++		KubeConfigPath: defaultKubeConfigPath,
++	}
++	if err := json.Unmarshal(stdin, &conf); err != nil {
++		return nil, fmt.Errorf("failed to parse network configuration: %v", err)
++	}
++	if err := version.ParsePrevResult(&conf.NetConf); err != nil {
++		return nil, fmt.Errorf("could not parse prevResult: %v", err)
++	}
++
++	file, err := os.OpenFile("/tmp/cxi_cni_tmp", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0600)
++	if err != nil {
++		return nil, fmt.Errorf("failed to open tmp cni file: %v", err)
++	}
++	file.WriteString(fmt.Sprintf("Config: %+v\n", conf))
++	file.WriteString(fmt.Sprintf("Enable Log: %+v\n", conf.EnableLog))
++	file.WriteString(fmt.Sprintf("Log Dir: %+v\n", conf.LogDir))
++	file.WriteString(fmt.Sprintf("Log Mode: %+v\n", conf.LogMode))
++	file.WriteString(fmt.Sprintf("Raw config: %s\n", stdin))
++	file.Close()
++
++	return &conf, nil
++}
++
++func log(logstring string, config *PluginConf) {
++	if !config.EnableLog {
++		return
++	}
++
++	if Logfile == nil {
++		logmode, err := strconv.ParseUint(config.LogMode, 8, 32)
++		if err != nil {
++			fmt.Printf("error converting log mode %s\n", config.LogMode)
++			os.Exit(-1)
++		}
++		file, err := os.OpenFile(config.LogDir, os.O_CREATE|os.O_RDWR|os.O_APPEND, os.FileMode(logmode))
++		if err != nil {
++			fmt.Printf("error opening log file at %s\n", config.LogDir)
++			os.Exit(-1)
++		}
++		Logfile = file
++	}
++
++	_, err := Logfile.WriteString(logstring)
++	if err != nil {
++		fmt.Printf("Failed to write to logfile: %v\n", err)
++		return
++	}
++}
++
++func buildClient(config *PluginConf) (*kubernetes.Clientset, error) {
++	clientConfig, err := clientcmd.BuildConfigFromFlags("", config.KubeConfigPath)
++	if err != nil {
++		return nil, err
++	}
++	return kubernetes.NewForConfig(clientConfig)
++}
++
++func getNetnsInode(netns string) (uint64, error) {
++	handle, err := netns2.GetFromPath(netns)
++	if err != nil {
++		return 0, err
++	}
++	uniqueId := handle.UniqueId()
++	re := regexp.MustCompile(`NS\(\d*:(\d+)\)`)
++	inodeReg := re.FindStringSubmatch(uniqueId)
++	if len(inodeReg) == 2 {
++		inode, err := strconv.ParseUint(inodeReg[1], 10, 64)
++		if err != nil {
++			return 0, err
++		}
++		return inode, nil
++	}
++	return 0, fmt.Errorf("did not find inode in unique id: %s", uniqueId)
++}
++
++// Given the kubernetes arguments such as pod name or namespace, fetch the VNI pre-allocated for that pod
++// Note that this queries the node-local Kubernetes API in order to receive the owning Resource (i.e. Job, ReplicaSet, etc.) & attached VNI object
++func getVNI(err error, subargMap map[string]string, conf *PluginConf) (uint16, error) {
++	clientset, err := buildClient(conf)
++	if err != nil {
++		return 0, fmt.Errorf("error building k8s client: %v", err)
++	}
++
++	// get additional info on pod from k8s api
++	namespace := subargMap["K8S_POD_NAMESPACE"]
++	res, err := clientset.CoreV1().Pods(namespace).List(context.TODO(),
++		metav1.ListOptions{
++			FieldSelector: fmt.Sprintf("metadata.name=%s", subargMap["K8S_POD_NAME"]),
++		})
++	if err != nil {
++		return 0, fmt.Errorf("error getting pods: %v", err)
++	}
++
++	// extract UID of owning resource
++	if len(res.Items) == 0 {
++		return 0, fmt.Errorf("no pods")
++	}
++	pod := res.Items[0]
++
++	if len(pod.OwnerReferences) == 0 {
++		return uint16(0), ErrNoOwningEntity
++	}
++	owner := pod.OwnerReferences[0]
++	var ownerAnnotations map[string]string
++	var terminationGracePeriodSeconds int64
++	switch fmt.Sprintf("%s/%s", owner.APIVersion, owner.Kind) {
++	case "batch/v1/Job":
++		res, err := clientset.BatchV1().Jobs(namespace).Get(context.TODO(), owner.Name, metav1.GetOptions{})
++		if err != nil {
++			return 0, err
++		}
++		ownerAnnotations = res.Annotations
++		terminationGracePeriodSeconds = *res.Spec.Template.Spec.TerminationGracePeriodSeconds
++		break
++	case "apps/v1/DaemonSet":
++		res, err := clientset.AppsV1().DaemonSets(namespace).Get(context.TODO(), owner.Name, metav1.GetOptions{})
++		if err != nil {
++			return 0, err
++		}
++		ownerAnnotations = res.Annotations
++		terminationGracePeriodSeconds = *res.Spec.Template.Spec.TerminationGracePeriodSeconds
++		break
++	case "apps/v1/Deployment":
++		res, err := clientset.AppsV1().Deployments(namespace).Get(context.TODO(), owner.Name, metav1.GetOptions{})
++		if err != nil {
++			return 0, err
++		}
++		ownerAnnotations = res.Annotations
++		terminationGracePeriodSeconds = *res.Spec.Template.Spec.TerminationGracePeriodSeconds
++		break
++	case "apps/v1/ReplicaSet":
++		res, err := clientset.AppsV1().ReplicaSets(namespace).Get(context.TODO(), owner.Name, metav1.GetOptions{})
++		if err != nil {
++			return 0, err
++		}
++		ownerAnnotations = res.Annotations
++		terminationGracePeriodSeconds = *res.Spec.Template.Spec.TerminationGracePeriodSeconds
++		break
++	default:
++		// cannot use built-in types, so trying to do it manually
++
++		kindConverted := fmt.Sprintf("%ss", strings.ToLower(owner.Kind))
++		result, err := clientset.RESTClient().
++			Get().
++			RequestURI(fmt.Sprintf("/apis/%s/namespaces/%s/%s/%s/", owner.APIVersion, namespace, kindConverted, owner.Name)).
++			Do(context.TODO()).
++			Raw()
++
++		if err != nil {
++			return 0, fmt.Errorf("error on rest call: %v", err)
++		}
++		annotations := gjson.GetBytes(result, "metadata.annotations").Map()
++		ownerAnnotations = make(map[string]string)
++		for k, v := range annotations {
++			ownerAnnotations[k] = v.String()
++		}
++
++		terminationGracePeriodSeconds = gjson.GetBytes(result, "spec.template.spec.terminationGracePeriodSeconds").Int()
++	}
++
++	if ownerAnnotations == nil {
++		return 0, ErrNoVNIRequested
++	}
++	vniAnnotation, okVni := ownerAnnotations["vni"]
++	log(fmt.Sprintf("  Annotations for %v: %s\n", owner, vniAnnotation), conf)
++
++	if !(okVni && (strings.ToLower(vniAnnotation) == "yes" ||
++		strings.ToLower(vniAnnotation) == "true")) {
++		return 0, ErrNoVNIRequested
++	}
++
++	if terminationGracePeriodSeconds > 30 {
++		return 0, errors.New(fmt.Sprintf("terminationGracePeriodSeconds must be <= 30sec (is: %d)", terminationGracePeriodSeconds))
++	}
++	//var vniUid string
++	vniUid := fmt.Sprintf("vni-%s", owner.UID)
++
++	log(fmt.Sprintf("  fetching VNI for VNI UID %s\n", vniUid), conf)
++	// fetch VNI from owner if requested
++	result, err := clientset.RESTClient().
++		Get().
++		RequestURI(
++			fmt.Sprintf("/apis/horizon-opencube.eu/v1/namespaces/%s/vnis/%s", namespace, vniUid)).
++		Do(context.TODO()).
++		Raw()
++
++	if err != nil {
++		log(fmt.Sprintf("  error while getting VNI: %s\n", err), conf)
++		return 0, ErrNoVNICreated
++	}
++
++	vni := gjson.GetBytes(result, "spec.vni").Int()
++	return uint16(vni), nil
++}
++
++// cmdAdd is called for ADD requests
++// Responsible for fetching a VNI and creating & configuring the CXI service
++func cmdAdd(args *skel.CmdArgs) error {
++	conf, err := parseConfig(args.StdinData)
++	if err != nil {
++		return err
++	}
++
++	// START chained plugin code
++	if conf.PrevResult == nil {
++		return fmt.Errorf("must be called as chained plugin")
++	}
++
++	// Convert the PrevResult to a concrete Result type that can be modified.
++	prevResult, err := current.GetResult(conf.PrevResult)
++	if err != nil {
++		return fmt.Errorf("failed to convert prevResult: %v", err)
++	}
++
++	// Pass the prevResult through this plugin to the next one
++	result := prevResult
++
++	log(fmt.Sprintf("[%s] ADD - Container ID: %s, if-name: %s, netns: %s, path: %s\n  args: %s\n",
++		time.Now().Format(time.RFC3339),
++		args.ContainerID, args.IfName, args.Netns, args.Path,
++		args.Args),
++		conf)
++
++	subargs := strings.Split(args.Args, ";")
++	subargMap := map[string]string{}
++	for _, arg := range subargs {
++		components := strings.Split(arg, "=")
++		if len(components) == 2 {
++			subargMap[components[0]] = components[1]
++		}
++	}
++
++	// the netns (numeric) ID is the same as the inode of the netns directory
++	netnsInode, err := getNetnsInode(args.Netns)
++
++	if err != nil {
++		log(fmt.Sprintf("  Error getNetnsInode(): %s\n", err), conf)
++	} else {
++		log(fmt.Sprintf("  inode of netns: %d\n", netnsInode), conf)
++	}
++
++	vni, err := getVNI(err, subargMap, conf)
++
++	if err != nil {
++		if errors.Is(err, ErrNoVNICreated) {
++			log(fmt.Sprintf("  Error getVNI(): %s\n", err), conf)
++			return fmt.Errorf("no VNI was created: %v", err)
++		}
++		//if errors.Is(err, ErrNoVNIRequested) || errors.Is(err, ErrNoOwningEntity) {
++		log(fmt.Sprintf("  accepted error: %s\n", err), conf)
++		return types.PrintResult(result, conf.CNIVersion)
++		//}
++
++	}
++	log(fmt.Sprintf("  vni: %d\n", vni), conf)
++
++	svcs, err := createService(netnsInode, []uint16{vni})
++	if err != nil {
++		log(fmt.Sprintf("  Error during CXI service creation: %v+\n", err), conf)
++		return err
++	}
++	log(fmt.Sprintf("  created CXI service(s) for netns %d: %v\n", netnsInode, svcs), conf)
++
++	// Pass through the result for the next plugin
++	return types.PrintResult(result, conf.CNIVersion)
++}
++
++// cmdDel is called for DELETE requests
++// Responsible for deleting the CXI service
++func cmdDel(args *skel.CmdArgs) error {
++	conf, err := parseConfig(args.StdinData)
++	if err != nil {
++		return err
++	}
++
++	log(fmt.Sprintf("[%s] DELETE - Container ID: %s,  if-name: %s, netns: %s, path: %s\n  args: %s\n",
++		time.Now().Format(time.RFC3339), args.ContainerID, args.IfName, args.Netns, args.Path, args.Args), conf)
++
++	netnsInode, err := getNetnsInode(args.Netns)
++	if err != nil {
++		// this can happen if the CXI CNI /del is called multiple times (allowed as per spec)
++		//  so don't elevate the error here
++		log(fmt.Sprintf("  Error getting inode: %s\n", err), conf)
++		return nil
++	}
++
++	log(fmt.Sprintf("  inode of netns: %d\n", netnsInode), conf)
++
++	err = destroyService(netnsInode)
++	if err != nil {
++		log(fmt.Sprintf("  Error during CXI service deletion: %v+\n", err), conf)
++		return err
++	}
++	return nil
++}
++
++func cmdCheck(args *skel.CmdArgs) error {
++	conf, err := parseConfig(args.StdinData)
++	if err != nil {
++		return err
++	}
++	log(fmt.Sprintf("[%s] CHECK\n", time.Now().Format(time.RFC3339)), conf)
++	return fmt.Errorf("not implemented")
++}
++
++func cmdStatus(args *skel.CmdArgs) error {
++	conf, err := parseConfig(args.StdinData)
++	if err != nil {
++		return err
++	}
++	log(fmt.Sprintf("[%s] STATUS\n", time.Now().Format(time.RFC3339)), conf)
++	return fmt.Errorf("not implemented")
++}
++
++func main() {
++	skel.PluginMainFuncs(skel.CNIFuncs{
++		Add:    cmdAdd,
++		Check:  cmdCheck,
++		Del:    cmdDel,
++		Status: cmdStatus,
++	}, version.All, bv.BuildString("cxi"))
++	if Logfile != nil {
++		Logfile.Close()
++	}
++}

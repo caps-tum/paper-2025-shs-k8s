@@ -18,7 +18,9 @@ Run `go mod tidy` and then `go mod vendor`. Finally, run `build_linux.sh`, which
 
 Move this binary to the folder of your CNI plugins. The exact location depends on the Kubernetes deployment and the used network software. For a default flannel, this is `/opt/cni/bin`.
 
-The currrent version (as of 2025-10-10) fetches information on pods and VNI CRs from the cluster via the kubelet API server. The connection is established via a K8s client. The configuration file for that client is read from a file at `/etc/rancher/k3s/k3s.yaml`. This file is basically your `~/.kube/config` file. Make sure you create a file at that location _on all nodes_ and make sure that the permissions of the client certificates in that file allow the CXI CNI plugin to read VNI CRs!
+After applying the patches, the `plugins` reposity will contain the file `plugins/cxi/README.md`, which contains more information on the plugin and its configuration.
+
+Note: The current version (as of 2025-10-10) fetches information on pods and VNI CRs from the cluster via the kubelet API server. The connection is established via a K8s client. By default, the client is initialised using a configuration at `/etc/rancher/k3s/k3s.yaml`. This file is basically your `~/.kube/config` file. Make sure you create a file at that location _on all nodes_ and make sure that the permissions of the client certificates in that file allow the CXI CNI plugin to read VNI CRs! Alternatively, update the CXI CNI configuration (see README in `plugins/cxi`) and point it to a configuration file.
 
 ### Install in K3s via Flannel
 
